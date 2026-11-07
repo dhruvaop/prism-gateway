@@ -3,7 +3,9 @@ import { Activity, ArrowDownRight, ArrowUpRight, Boxes, Check, ChevronDown, Circ
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import AuthScreen from './AuthScreen.jsx'
 
-const API = import.meta.env.VITE_API_URL ?? 'http://localhost:8080'
+// Use same-origin paths by default so LAN and reverse-proxy deployments do not
+// make the browser call localhost on the viewer's own device.
+const API = import.meta.env.VITE_API_URL ?? ''
 const money = n => `$${Number(n || 0).toFixed(4)}`
 const timeAgo = d => { const s=Math.max(0,Math.floor((Date.now()-new Date(d).getTime())/1000)); return s<60?`${s}s ago`:s<3600?`${Math.floor(s/60)}m ago`:`${Math.floor(s/3600)}h ago` }
 const nav = [{label:'Overview',icon:Gauge},{label:'Playground',icon:TerminalSquare},{label:'Requests',icon:Activity},{label:'Virtual keys',icon:KeyRound},{label:'Semantic cache',icon:Database}]
