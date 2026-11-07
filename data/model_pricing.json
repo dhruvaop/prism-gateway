@@ -1,7 +1,9 @@
 {
-  "_comment": "Prices in USD per 1M tokens. These are the source of truth for cost accounting against the mock providers. If you add a real provider, append its models here with current prices from the provider's pricing page.",
+  "_comment": "Prices in USD per 1M tokens. These entries are the source of truth for cost accounting. OpenRouter entries below refer to the explicitly selected zero-price model; update them from the provider's pricing page if the model's price changes.",
   "alpha-small": { "input_per_1m": 0.15, "output_per_1m": 0.60 },
   "alpha-large": { "input_per_1m": 3.00, "output_per_1m": 15.00 },
   "beta-small":  { "input_per_1m": 0.10, "output_per_1m": 0.40 },
-  "beta-large":  { "input_per_1m": 2.50, "output_per_1m": 10.00 }
+  "beta-large":  { "input_per_1m": 2.50, "output_per_1m": 10.00 },
+  "openrouter-fast": { "input_per_1m": 0.0, "output_per_1m": 0.0 },
+  "openrouter-smart": { "input_per_1m": 0.0, "output_per_1m": 0.0 }
 }

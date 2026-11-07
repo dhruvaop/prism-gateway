@@ -54,6 +54,10 @@ class GatewayApiTest {
         mvc.perform(get("/admin/overview")).andExpect(status().isOk()).andExpect(jsonPath("$.active_keys").value(4));
         mvc.perform(get("/admin/router/eval")).andExpect(status().isOk()).andExpect(jsonPath("$.total").value(20)).andExpect(jsonPath("$.accuracy").value(org.hamcrest.Matchers.greaterThanOrEqualTo(0.9)));
     }
+    @Test void seededTenantsAreStoredInThePersistentDatabase() {
+        org.junit.jupiter.api.Assertions.assertEquals(4, db.queryForObject("SELECT COUNT(*) FROM tenant_keys", Integer.class));
+        org.junit.jupiter.api.Assertions.assertEquals("search", db.queryForObject("SELECT team FROM tenant_keys WHERE virtual_key=?", String.class, "prism-sk-search-1a2b3c"));
+    }
     @Test void malformedEmptyMessagesReturn400() throws Exception {
         assertError(chat("prism-sk-research-4d5e6f","{\"model\":\"fast\",\"messages\":[]}"),400,"invalid_request_error");
     }

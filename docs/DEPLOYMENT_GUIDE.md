@@ -28,6 +28,8 @@ The first build downloads Java, Node, Python, and PostgreSQL images and the app 
 - Gateway health check: http://localhost:8081/health
 - OpenAI-compatible API: http://localhost:8081/v1/chat/completions
 
+The deployment database is PostgreSQL 17. Its internal Docker endpoint is `db:5432`, database name `prism`; the gateway connects with `jdbc:postgresql://db:5432/prism`. Flyway applies SQL migrations from `backend/src/main/resources/db/migration/postgresql/` at startup. Those migrations create request logs, monthly usage, cache entries, and persistent seeded virtual keys. Keep PostgreSQL private; application callers use the HTTP gateway endpoint on port 8081, not the database port.
+
 The browser goes to the console, and the web server forwards API calls to the Java gateway. That is why the same URLs work without setting up a separate API address.
 
 Leave that terminal open while using Prism. To stop the services, press Ctrl+C. The PostgreSQL database is in a Docker volume named prism-postgres, so restarting the containers does not erase usage history. To deliberately erase that demo database, run:
@@ -107,7 +109,7 @@ The included compose file is for demonstration with mock providers. Keep mock pr
 
 The seed virtual keys are examples for local demos. Replace them before inviting outside users. Admin endpoints currently have no login, and the gateway is designed as a single-instance capstone service. Do not expose the admin endpoints to the public internet without adding authentication. Keep the PostgreSQL volume on persistent disk and back it up. PostgreSQL is shared by service replicas; the in-memory requests-per-minute limiter is still per gateway instance, so use Redis or a database-backed limiter before running multiple gateway replicas.
 
-To use a real AI provider, connect an OpenAI-compatible provider through the provider adapter and configure its key as a server-side secret. Never put provider keys in the React app, browser requests, public source control, or request logs. This Compose setup uses only the free mock providers and does not send prompts to a paid model. Prism does not depend on OpenRouter; when it is unavailable, the configured provider chain can still use Alpha/Beta or another configured OpenAI-compatible provider.
+The default configuration follows the problem statement's Alpha/Beta mock demo and fallback order. OpenRouter is optional: `OPENROUTER_API_KEY` adds it after the configured mock providers. Set `OPENROUTER_PREFER_AS_PRIMARY=true` only if you deliberately want OpenRouter ahead of Alpha/Beta. Keep the key in the gateway environment; the React app never receives it.
 
 ## Demo keys and request example
 

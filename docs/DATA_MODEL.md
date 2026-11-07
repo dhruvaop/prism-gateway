@@ -114,6 +114,7 @@ Good To Have fields:
 
 ## Storage Expectations
 
-- Keys, logs, and usage survive a gateway restart.
+- Seeded keys, logs, usage, and cache entries survive a gateway restart. Seed keys are upserted from `data/seed_keys.json` into `tenant_keys`, then loaded from that table for authentication.
+- Budget admission is serialized per key for the full request, including the streamed response, so usage is committed before the next request checks the remaining monthly budget. This guarantee is single-instance; multiple gateway replicas require shared locking.
 - Rate-limit state may be in memory for Must Have (single instance), but must be race-safe: token bucket, sliding window with atomic operations, or equivalent — not read-then-write.
 - The cache store choice is yours (same database, a dedicated table, or an in-memory store with persistence); document eviction behavior.

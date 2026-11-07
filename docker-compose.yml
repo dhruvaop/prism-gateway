@@ -43,6 +43,8 @@ services:
       DATABASE_USERNAME: prism
       DATABASE_PASSWORD: ${DATABASE_PASSWORD:-prism-demo-only}
       PRISM_DATA_DIR: /app/data
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_PREFER_AS_PRIMARY: ${OPENROUTER_PREFER_AS_PRIMARY:-false}
     volumes:
       - ./data:/app/data:ro
       - ./deploy/gateway_config.sample.json:/app/data/gateway_config.sample.json:ro

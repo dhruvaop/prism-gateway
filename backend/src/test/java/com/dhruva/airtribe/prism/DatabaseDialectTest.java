@@ -26,5 +26,8 @@ class DatabaseDialectTest {
         try(InputStream in=new ClassPathResource("db/migration/postgresql/V1__create_prism_tables.sql").getInputStream()){
             String ddl=new String(in.readAllBytes(),StandardCharsets.UTF_8);assertTrue(ddl.contains("CREATE TABLE usage_monthly"));assertTrue(ddl.contains("PRIMARY KEY (virtual_key, month)"));assertTrue(ddl.contains("BIGSERIAL PRIMARY KEY"));
         }
+        try(InputStream in=new ClassPathResource("db/migration/postgresql/V2__create_tenant_keys.sql").getInputStream()){
+            String ddl=new String(in.readAllBytes(),StandardCharsets.UTF_8);assertTrue(ddl.contains("CREATE TABLE tenant_keys"));assertTrue(ddl.contains("virtual_key TEXT PRIMARY KEY"));
+        }
     }
 }

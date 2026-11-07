@@ -17,12 +17,12 @@ public class GatewayController {
 
     @PostMapping("/v1/chat/completions")
     public ResponseEntity<StreamingResponseBody> chat(@RequestHeader(value="Authorization",required=false) String auth,@RequestBody Map<String,Object> body){
-        String requested=String.valueOf(body.getOrDefault("model","")); PrismService.Tenant tenant=null; long started=System.nanoTime(); String id="req_"+UUID.randomUUID();
+        String requested=String.valueOf(body.getOrDefault("model","")); PrismService.Tenant tenant=null; PrismService.BudgetLease budgetLease=null; boolean streamOwnsLease=false; long started=System.nanoTime(); String id="req_"+UUID.randomUUID();
         try{
-            tenant=prism.authenticate(auth); prism.validateRequest(body); prism.admit(tenant,requested);
+            tenant=prism.authenticate(auth); prism.validateRequest(body); budgetLease=prism.acquireBudgetLease(tenant); prism.admit(tenant,requested);
             if(Boolean.TRUE.equals(body.get("stream"))){
                 PrismService.StreamSession stream=prism.beginStream(tenant,body);HttpHeaders h=new HttpHeaders();h.set("x-prism-provider",stream.provider());h.set("x-prism-cache",stream.cached()==null?"miss":"hit");h.set("x-prism-fallback",Boolean.toString(stream.fallback()));h.set("x-prism-request-id",stream.requestId());h.setContentType(MediaType.TEXT_EVENT_STREAM);h.setCacheControl(CacheControl.noCache());
-                StreamingResponseBody bodyStream=output->prism.writeStream(stream,output);return ResponseEntity.ok().headers(h).contentType(MediaType.TEXT_EVENT_STREAM).body(bodyStream);
+                PrismService.BudgetLease streamLease=budgetLease;StreamingResponseBody bodyStream=output->{try{prism.writeStream(stream,output);}finally{streamLease.close();}};streamOwnsLease=true;return ResponseEntity.ok().headers(h).contentType(MediaType.TEXT_EVENT_STREAM).body(bodyStream);
             }
             PrismService.Result r=prism.complete(tenant,body);
             HttpHeaders h=new HttpHeaders();h.set("x-prism-provider",Objects.toString(r.provider(),"cache"));h.set("x-prism-cache",r.cacheHit()?"hit":"miss");h.set("x-prism-fallback",Boolean.toString(r.fallback()));h.set("x-prism-cost-usd",String.format(Locale.US,"%.9f",r.cost()));h.set("x-prism-request-id",r.requestId());
@@ -32,7 +32,7 @@ public class GatewayController {
             String status=switch(ex.type){case "authentication_error"->"rejected_auth";case "model_not_allowed"->"rejected_allowlist";case "rate_limit_exceeded"->"rejected_rate_limit";case "budget_exceeded"->"rejected_budget";case "invalid_request_error"->"rejected_invalid_request";default->ex.type.equals("upstream_error")?"upstream_error":ex.type.equals("not_found_error")?"rejected_model":"rejected_error";};
             prism.log(tenant,requested,status,null,null,0,0,0,"miss",false,null,0,(System.nanoTime()-started)/1_000_000,id);
             Map<String,Object> error=Map.of("error",Map.of("message",ex.getMessage(),"type",ex.type,"code",ex.type));StreamingResponseBody response=output->output.write(json.writeValueAsBytes(error));return ResponseEntity.status(ex.status).contentType(MediaType.APPLICATION_JSON).body(response);
-        }
+        } finally { if(budgetLease!=null&&!streamOwnsLease)budgetLease.close(); }
     }
 
     @GetMapping("/health") public Map<String,Object> health(){return Map.of("status","ok","service","prism-gateway");}

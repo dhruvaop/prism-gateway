@@ -22,6 +22,8 @@ import java.time.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
 @Service
@@ -30,6 +32,9 @@ public class PrismService {
     private final JdbcTemplate db;
     private final ObjectMapper json = new ObjectMapper();
     @Value("${prism.data-dir}") private String dataDir;
+    @Value("${openrouter.api-key:}") private String openRouterApiKey;
+    @Value("${openrouter.base-url:https://openrouter.ai/api/v1}") private String openRouterBaseUrl;
+    @Value("${openrouter.prefer-as-primary:false}") private boolean openRouterPreferAsPrimary;
     @Value("${spring.datasource.url}") private String databaseUrl;
     @Value("${prism.upstream-timeout-ms}") private int timeoutMs;
     @Value("${prism.retry.max-attempts:3}") private int maxAttempts;
@@ -39,7 +44,10 @@ public class PrismService {
     private final Map<String, Provider> providers = new HashMap<>();
     private final Map<String, Alias> aliases = new HashMap<>();
     private final Map<String, Price> prices = new HashMap<>();
+    private final Map<String, String> routeProviders = new HashMap<>();
+    private final Map<String, String> upstreamModels = new HashMap<>();
     private final Map<String, Deque<Long>> requests = new ConcurrentHashMap<>();
+    private final Map<String, Semaphore> budgetAdmission = new ConcurrentHashMap<>();
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofMillis(2500)).build();
 
     public PrismService(JdbcTemplate db) { this.db = db; }
@@ -48,6 +56,7 @@ public class PrismService {
         DatabaseDialect.Kind database=DatabaseDialect.detect(databaseUrl);
         if(database==DatabaseDialect.Kind.SQLITE){
             db.execute("PRAGMA journal_mode=WAL"); db.execute("PRAGMA busy_timeout=10000");
+            db.execute("CREATE TABLE IF NOT EXISTS tenant_keys(virtual_key TEXT PRIMARY KEY,team TEXT NOT NULL,monthly_budget_usd DOUBLE PRECISION NOT NULL,requests_per_minute INTEGER NOT NULL,tokens_per_minute INTEGER NOT NULL,model_allowlist TEXT NOT NULL,cache_enabled INTEGER NOT NULL,similarity_threshold DOUBLE PRECISION NOT NULL,enabled INTEGER NOT NULL DEFAULT 1)");
             db.execute("CREATE TABLE IF NOT EXISTS request_logs(request_id TEXT PRIMARY KEY, virtual_key TEXT, team TEXT, requested_model TEXT, resolved_provider TEXT, resolved_model TEXT, status TEXT, prompt_tokens INTEGER DEFAULT 0, completion_tokens INTEGER DEFAULT 0, cost_usd DOUBLE PRECISION DEFAULT 0, cache TEXT, fallback INTEGER DEFAULT 0, route_reason TEXT, retries INTEGER DEFAULT 0, latency_ms INTEGER DEFAULT 0, created_at TEXT)");
             db.execute("CREATE TABLE IF NOT EXISTS usage_monthly(virtual_key TEXT, month TEXT, team TEXT, requests INTEGER DEFAULT 0, prompt_tokens INTEGER DEFAULT 0, completion_tokens INTEGER DEFAULT 0, cost_usd DOUBLE PRECISION DEFAULT 0, cache_hits INTEGER DEFAULT 0, PRIMARY KEY(virtual_key,month))");
             try { db.execute("ALTER TABLE usage_monthly ADD COLUMN team TEXT"); } catch (Exception ignored) { }
@@ -60,25 +69,41 @@ public class PrismService {
     private JsonNode read(Path p) throws IOException { return json.readTree(Files.readAllBytes(p)); }
     private void loadTenants(Path p) throws IOException {
         for (JsonNode n : read(p).path("tenants")) {
-            JsonNode c=n.path("semantic_cache"); Tenant t=new Tenant(n.path("virtual_key").asText(),n.path("team").asText(),n.path("monthly_budget_usd").asDouble(),n.path("rate_limit").path("requests_per_minute").asInt(),n.path("rate_limit").path("tokens_per_minute").asInt(0), strings(n.path("model_allowlist")),c.path("enabled").asBoolean(),c.path("similarity_threshold").asDouble(.92));
-            tenants.put(t.key,t);
+            JsonNode c=n.path("semantic_cache");
+            db.update("INSERT INTO tenant_keys(virtual_key,team,monthly_budget_usd,requests_per_minute,tokens_per_minute,model_allowlist,cache_enabled,similarity_threshold,enabled) VALUES(?,?,?,?,?,?,?,?,1) ON CONFLICT(virtual_key) DO UPDATE SET team=excluded.team,monthly_budget_usd=excluded.monthly_budget_usd,requests_per_minute=excluded.requests_per_minute,tokens_per_minute=excluded.tokens_per_minute,model_allowlist=excluded.model_allowlist,cache_enabled=excluded.cache_enabled,similarity_threshold=excluded.similarity_threshold,enabled=1",
+                    n.path("virtual_key").asText(),n.path("team").asText(),n.path("monthly_budget_usd").asDouble(),n.path("rate_limit").path("requests_per_minute").asInt(),n.path("rate_limit").path("tokens_per_minute").asInt(0),json.writeValueAsString(strings(n.path("model_allowlist"))),c.path("enabled").asBoolean()?1:0,c.path("similarity_threshold").asDouble(.92));
+        }
+        for(Map<String,Object> row:db.queryForList("SELECT virtual_key,team,monthly_budget_usd,requests_per_minute,tokens_per_minute,model_allowlist,cache_enabled,similarity_threshold FROM tenant_keys WHERE enabled=1")){
+            try{Tenant t=new Tenant(String.valueOf(row.get("virtual_key")),String.valueOf(row.get("team")),((Number)row.get("monthly_budget_usd")).doubleValue(),((Number)row.get("requests_per_minute")).intValue(),((Number)row.get("tokens_per_minute")).intValue(),Arrays.asList(json.readValue(String.valueOf(row.get("model_allowlist")),String[].class)),((Number)row.get("cache_enabled")).intValue()!=0,((Number)row.get("similarity_threshold")).doubleValue());tenants.put(t.key,t);}catch(Exception ex){throw new IOException("Unable to load a persisted virtual key",ex);}
         }
     }
     private void loadConfig(Path p) throws IOException {
         JsonNode root=read(p); for(JsonNode n:root.path("providers")) providers.put(n.path("name").asText(),new Provider(n.path("name").asText(),n.path("base_url").asText(),n.path("api_key").asText()));
         root.path("model_aliases").fields().forEachRemaining(e->{JsonNode n=e.getValue(); if(n.has("primary")) aliases.put(e.getKey(),new Alias(n.path("primary").asText(),strings(n.path("fallbacks"))));});
         JsonNode retry=root.path("retry");if(retry.isObject()){maxAttempts=retry.path("max_attempts").asInt(maxAttempts);initialBackoffMs=retry.path("initial_backoff_ms").asInt(initialBackoffMs);backoffMultiplier=retry.path("backoff_multiplier").asInt(backoffMultiplier);}
+        if(openRouterApiKey!=null&&!openRouterApiKey.isBlank()){
+            String model="nvidia/nemotron-3.5-lightning:free";providers.put("openrouter",new Provider("openrouter",openRouterBaseUrl,openRouterApiKey));
+            routeProviders.put("openrouter-fast","openrouter");routeProviders.put("openrouter-smart","openrouter");upstreamModels.put("openrouter-fast",model);upstreamModels.put("openrouter-smart",model);
+            if(openRouterPreferAsPrimary){
+                aliases.put("fast",new Alias("openrouter-fast",List.of("alpha-small","beta-small")));
+                aliases.put("smart",new Alias("openrouter-smart",List.of("alpha-large","beta-large")));
+            }else{
+                appendFallback("fast","openrouter-fast");appendFallback("smart","openrouter-smart");
+            }
+        }
     }
+    private void appendFallback(String alias,String model){Alias current=aliases.get(alias);if(current==null)return;List<String> fallbacks=new ArrayList<>(current.fallbacks);if(!fallbacks.contains(model))fallbacks.add(model);aliases.put(alias,new Alias(current.primary,fallbacks));}
     private void loadPrices(Path p) throws IOException { read(p).fields().forEachRemaining(e->prices.put(e.getKey(),new Price(e.getValue().path("input_per_1m").asDouble(),e.getValue().path("output_per_1m").asDouble()))); }
     private List<String> strings(JsonNode n) { List<String> a=new ArrayList<>(); n.forEach(x->a.add(x.asText())); return a; }
     public Collection<Tenant> tenantList(){ return tenants.values(); }
     public record Tenant(String key,String team,double budget,int rpm,int tpm,List<String> allowlist,boolean cacheEnabled,double threshold) {}
+    public static final class BudgetLease implements AutoCloseable { private final Semaphore semaphore; private final AtomicBoolean closed=new AtomicBoolean(); private BudgetLease(Semaphore semaphore){this.semaphore=semaphore;} @Override public void close(){if(closed.compareAndSet(false,true))semaphore.release();} }
     public record Provider(String name,String url,String key) {}
     private record Alias(String primary,List<String> fallbacks) {}
     private record Price(double input,double output) {}
     public static class GatewayException extends RuntimeException { public final int status; public final String type; GatewayException(int s,String t,String m){super(m);status=s;type=t;} }
     public record Result(Map<String,Object> payload,String provider,String model,boolean fallback,double cost,int promptTokens,int completionTokens,String routeReason,int retries,boolean cacheHit,long latencyMs,String requestId) {}
-    public record StreamSession(InputStream input,Map<String,Object> cached,Tenant tenant,String requested,String prompt,String model,String provider,boolean fallback,String reason,int retries,String requestId,long started) {}
+    public record StreamSession(InputStream input,Map<String,Object> cached,Tenant tenant,String requested,String prompt,String model,String pricingModel,String provider,boolean fallback,String reason,int retries,String requestId,long started) {}
 
     public synchronized void log(Tenant t,String requested,String status,String provider,String model,int pt,int ct,double cost,String cache,boolean fallback,String reason,int retries,long latency,String id) {
         String now=Instant.now().toString(); db.update("INSERT INTO request_logs(request_id,virtual_key,team,requested_model,resolved_provider,resolved_model,status,prompt_tokens,completion_tokens,cost_usd,cache,fallback,route_reason,retries,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(request_id) DO UPDATE SET virtual_key=excluded.virtual_key,team=excluded.team,requested_model=excluded.requested_model,resolved_provider=excluded.resolved_provider,resolved_model=excluded.resolved_model,status=excluded.status,prompt_tokens=excluded.prompt_tokens,completion_tokens=excluded.completion_tokens,cost_usd=excluded.cost_usd,cache=excluded.cache,fallback=excluded.fallback,route_reason=excluded.route_reason,retries=excluded.retries,latency_ms=excluded.latency_ms,created_at=excluded.created_at",id,t==null?null:t.key,t==null?null:t.team,requested,provider,model,status,pt,ct,cost,cache,fallback?1:0,reason,retries,latency,now);
@@ -86,12 +111,13 @@ public class PrismService {
         LOGGER.info("gateway_request requestId={} team={} model={} status={} provider={} cache={} fallback={} retries={} promptTokens={} completionTokens={} costUsd={} latencyMs={}",id,t==null?"unknown":t.team,requested,status,provider==null?"none":provider,cache,fallback,retries,pt,ct,String.format(Locale.US,"%.9f",cost),latency);
     }
     public Tenant authenticate(String auth) { if(auth==null||!auth.startsWith("Bearer ")) throw new GatewayException(401,"authentication_error","Missing virtual key"); Tenant t=tenants.get(auth.substring(7).trim()); if(t==null) throw new GatewayException(401,"authentication_error","Invalid virtual key"); return t; }
+    public BudgetLease acquireBudgetLease(Tenant t){Semaphore lock=budgetAdmission.computeIfAbsent(t.key,k->new Semaphore(1,true));try{lock.acquire();return new BudgetLease(lock);}catch(InterruptedException ex){Thread.currentThread().interrupt();throw new GatewayException(503,"request_interrupted","Request interrupted while waiting for budget accounting");}}
     public void admit(Tenant t,String model) {
         validateModel(model);
         if(!t.allowlist.contains(model)) throw new GatewayException(403,"model_not_allowed","Model is not allowed for this key");
-        Deque<Long> q=requests.computeIfAbsent(t.key,k->new ConcurrentLinkedDeque<>()); long now=System.currentTimeMillis(); synchronized(q){ while(!q.isEmpty()&&now-q.peekFirst()>=60000)q.removeFirst(); if(q.size()>=t.rpm)throw new GatewayException(429,"rate_limit_exceeded","Requests per minute limit exceeded"); q.addLast(now); }
         Double spent=db.queryForObject("SELECT COALESCE((SELECT cost_usd FROM usage_monthly WHERE virtual_key=? AND month=?),0)",Double.class,t.key,YearMonth.now(ZoneOffset.UTC).toString());
         if(spent>=t.budget) throw new GatewayException(429,"budget_exceeded",String.format(Locale.US,"Monthly budget of $%.5f exhausted for this key",t.budget));
+        Deque<Long> q=requests.computeIfAbsent(t.key,k->new ConcurrentLinkedDeque<>()); long now=System.currentTimeMillis(); synchronized(q){ while(!q.isEmpty()&&now-q.peekFirst()>=60000)q.removeFirst(); if(q.size()>=t.rpm)throw new GatewayException(429,"rate_limit_exceeded","Requests per minute limit exceeded"); q.addLast(now); }
     }
     public void validateModel(String model){if(!model.equals("auto")&&!aliases.containsKey(model)&&!prices.containsKey(model))throw new GatewayException(404,"not_found_error","Unknown model or alias: "+model);}
     public void validateRequest(Map<String,Object> body){Object raw=body.get("messages");if(!(raw instanceof List<?> messages)||messages.isEmpty())throw new GatewayException(400,"invalid_request_error","messages must be a non-empty array");for(Object m:messages){if(!(m instanceof Map<?,?> map)||!map.containsKey("role")||!map.containsKey("content"))throw new GatewayException(400,"invalid_request_error","Each message must include role and content");}if(body.get("model")==null||String.valueOf(body.get("model")).isBlank())throw new GatewayException(400,"invalid_request_error","model is required");}
@@ -103,6 +129,17 @@ public class PrismService {
         Alias a=aliases.get(route); if(a!=null){List<String> out=new ArrayList<>();out.add(a.primary);out.addAll(a.fallbacks);return out.toArray(String[]::new);}
         if(prices.containsKey(requested))return new String[]{requested}; throw new GatewayException(404,"not_found_error","Unknown model or alias: "+requested);
     }
+    private Provider providerFor(String model) {
+        String providerName=routeProviders.get(model);
+        if(providerName==null) providerName=model.contains("-")?model.substring(0,model.indexOf('-')):model;
+        return providers.get(providerName);
+    }
+    private void prepareOpenRouterRequest(Provider provider,Map<String,Object> outbound) {
+        if(!provider.name.equals("openrouter")) return;
+        outbound.putIfAbsent("max_tokens",512);
+        outbound.put("reasoning",Map.of("effort","minimal"));
+        if(Boolean.TRUE.equals(outbound.get("stream"))) outbound.put("stream_options",Map.of("include_usage",true));
+    }
     public Result complete(Tenant t,Map<String,Object> body) {
         long start=System.nanoTime(); String requested=String.valueOf(body.getOrDefault("model","")), prompt=prompt(body), requestId="req_"+UUID.randomUUID(); String reason=null; String resolvedRequest=requested;
         if(requested.equals("auto")){String decision=autoRoute(prompt); resolvedRequest=decision.substring(0,decision.indexOf('|'));reason="auto → "+decision.replace('|',':');LOGGER.debug("routing_decision requestId={} tier={} reason={}",requestId,resolvedRequest,reason);}
@@ -110,11 +147,11 @@ public class PrismService {
         if(cache){Result hit=findCache(t,requested,prompt);if(hit!=null){long ms=(System.nanoTime()-start)/1_000_000;Result result=new Result(hit.payload,"cache",hit.model,false,0,hit.promptTokens,hit.completionTokens,reason,0,true,ms,requestId);log(t,requested,"cache_hit",null,null,result.promptTokens,result.completionTokens,0,"hit",false,reason,0,ms,requestId);return result;}}
         int retries=0; List<String> errors=new ArrayList<>();
         for(int ix=0;ix<chain.length;ix++){
-            String model=chain[ix], pname=model.contains("-")?model.substring(0,model.indexOf('-')):""; Provider provider=providers.get(pname); if(provider==null)continue;
-            Map<String,Object> outbound=new LinkedHashMap<>(body);outbound.put("model",model);outbound.put("stream",false);
+            String model=chain[ix];Provider provider=providerFor(model); if(provider==null)continue;String upstreamModel=upstreamModels.getOrDefault(model,model);
+            Map<String,Object> outbound=new LinkedHashMap<>(body);outbound.put("model",upstreamModel);outbound.put("stream",false);prepareOpenRouterRequest(provider,outbound);
             for(int attempt=0;attempt<maxAttempts;attempt++){ try{
                 HttpRequest req=HttpRequest.newBuilder(URI.create(provider.url.replaceAll("/$","")+"/chat/completions")).timeout(Duration.ofMillis(timeoutMs)).header("Authorization","Bearer "+provider.key).header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(outbound))).build();
-                HttpResponse<String> resp=http.send(req,HttpResponse.BodyHandlers.ofString()); if(resp.statusCode()==200){Map<String,Object> payload=json.readValue(resp.body(),Map.class);Map<?,?> usage=(Map<?,?>)payload.getOrDefault("usage",Map.of());int pt=num(usage.get("prompt_tokens")),ct=num(usage.get("completion_tokens"));double cost=cost(model,pt,ct);payload.put("model",model);long ms=(System.nanoTime()-start)/1_000_000;Result result=new Result(payload,provider.name+"/"+model,model,ix>0,cost,pt,ct,reason,retries,false,ms,requestId);log(t,requested,"ok",result.provider,model,pt,ct,cost,"miss",ix>0,reason,retries,ms,requestId);if(cache)saveCache(t,requested,prompt,payload);return result;}
+                HttpResponse<String> resp=http.send(req,HttpResponse.BodyHandlers.ofString()); if(resp.statusCode()==200){Map<String,Object> payload=json.readValue(resp.body(),Map.class);Map<?,?> usage=(Map<?,?>)payload.getOrDefault("usage",Map.of());int pt=num(usage.get("prompt_tokens")),ct=num(usage.get("completion_tokens"));double cost=cost(model,pt,ct);payload.put("model",upstreamModel);long ms=(System.nanoTime()-start)/1_000_000;Result result=new Result(payload,provider.name+"/"+upstreamModel,upstreamModel,ix>0,cost,pt,ct,reason,retries,false,ms,requestId);log(t,requested,"ok",result.provider,upstreamModel,pt,ct,cost,"miss",ix>0,reason,retries,ms,requestId);if(cache)saveCache(t,requested,prompt,payload);return result;}
                 errors.add(provider.name+" returned HTTP "+resp.statusCode()); if(!Set.of(408,429,500,502,503,504).contains(resp.statusCode()))break;LOGGER.warn("upstream_retry requestId={} provider={} model={} attempt={} reason=http_{}",requestId,provider.name,model,attempt+1,resp.statusCode());
             }catch(Exception ex){errors.add(provider.name+" unavailable");LOGGER.warn("upstream_retry requestId={} provider={} model={} attempt={} reason={}",requestId,provider.name,model,attempt+1,ex.getClass().getSimpleName());}
             if(attempt+1<maxAttempts){retries++;try{Thread.sleep((long)(initialBackoffMs*Math.pow(backoffMultiplier,attempt)));}catch(InterruptedException ex){Thread.currentThread().interrupt();break;}}
@@ -122,14 +159,14 @@ public class PrismService {
         }
         long ms=(System.nanoTime()-start)/1_000_000; LOGGER.error("upstream_exhausted requestId={} model={} attempts={} providers={}",requestId,requested,retries+1,chain.length);log(t,requested,"upstream_error",null,null,0,0,0,"miss",false,reason,retries,ms,requestId);throw new GatewayException(502,"upstream_error","All configured providers failed");
     }
-    public StreamSession beginStream(Tenant t,Map<String,Object> body){long started=System.nanoTime();String requested=String.valueOf(body.get("model")),prompt=prompt(body),id="req_"+UUID.randomUUID(),reason=null,target=requested;if(requested.equals("auto")){String d=autoRoute(prompt);target=d.substring(0,d.indexOf('|'));reason="auto → "+d.replace('|',':');}String[] models=chain(target);if(t.cacheEnabled&&!Boolean.FALSE.equals(body.get("cache"))){Result hit=findCache(t,requested,prompt);if(hit!=null)return new StreamSession(null,hit.payload,t,requested,prompt,hit.model,"cache",false,reason,0,id,started);}int retries=0;
-        for(int i=0;i<models.length;i++){String model=models[i],name=model.contains("-")?model.substring(0,model.indexOf('-')):"";Provider provider=providers.get(name);if(provider==null)continue;Map<String,Object> outbound=new LinkedHashMap<>(body);outbound.put("model",model);outbound.put("stream",true);
-            for(int attempt=0;attempt<maxAttempts;attempt++){try{HttpRequest req=HttpRequest.newBuilder(URI.create(provider.url.replaceAll("/$","")+"/chat/completions")).timeout(Duration.ofMillis(timeoutMs)).header("Authorization","Bearer "+provider.key).header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(outbound))).build();HttpResponse<InputStream> resp=http.send(req,HttpResponse.BodyHandlers.ofInputStream());if(resp.statusCode()==200)return new StreamSession(resp.body(),null,t,requested,prompt,model,provider.name+"/"+model,i>0,reason,retries,id,started);try{resp.body().close();}catch(Exception ignored){}if(!Set.of(408,429,500,502,503,504).contains(resp.statusCode()))break;}catch(Exception ex){/* try again, then move to the configured fallback */}if(attempt+1<maxAttempts){retries++;try{Thread.sleep((long)(initialBackoffMs*Math.pow(backoffMultiplier,attempt)));}catch(InterruptedException ex){Thread.currentThread().interrupt();break;}}}
+    public StreamSession beginStream(Tenant t,Map<String,Object> body){long started=System.nanoTime();String requested=String.valueOf(body.get("model")),prompt=prompt(body),id="req_"+UUID.randomUUID(),reason=null,target=requested;if(requested.equals("auto")){String d=autoRoute(prompt);target=d.substring(0,d.indexOf('|'));reason="auto → "+d.replace('|',':');}String[] models=chain(target);if(t.cacheEnabled&&!Boolean.FALSE.equals(body.get("cache"))){Result hit=findCache(t,requested,prompt);if(hit!=null){String cachedModel=String.valueOf(hit.payload.getOrDefault("model",hit.model));return new StreamSession(null,hit.payload,t,requested,prompt,cachedModel,hit.model,"cache",false,reason,0,id,started);}}int retries=0;
+        for(int i=0;i<models.length;i++){String model=models[i];Provider provider=providerFor(model);if(provider==null)continue;String upstreamModel=upstreamModels.getOrDefault(model,model);Map<String,Object> outbound=new LinkedHashMap<>(body);outbound.put("model",upstreamModel);outbound.put("stream",true);prepareOpenRouterRequest(provider,outbound);
+            for(int attempt=0;attempt<maxAttempts;attempt++){try{HttpRequest req=HttpRequest.newBuilder(URI.create(provider.url.replaceAll("/$","")+"/chat/completions")).timeout(Duration.ofMillis(timeoutMs)).header("Authorization","Bearer "+provider.key).header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(outbound))).build();HttpResponse<InputStream> resp=http.send(req,HttpResponse.BodyHandlers.ofInputStream());if(resp.statusCode()==200)return new StreamSession(resp.body(),null,t,requested,prompt,upstreamModel,model,provider.name+"/"+upstreamModel,i>0,reason,retries,id,started);try{resp.body().close();}catch(Exception ignored){}if(!Set.of(408,429,500,502,503,504).contains(resp.statusCode()))break;}catch(Exception ex){/* try again, then move to the configured fallback */}if(attempt+1<maxAttempts){retries++;try{Thread.sleep((long)(initialBackoffMs*Math.pow(backoffMultiplier,attempt)));}catch(InterruptedException ex){Thread.currentThread().interrupt();break;}}}
         }throw new GatewayException(502,"upstream_error","All configured providers failed for streaming request");}
     public void writeStream(StreamSession s,OutputStream out)throws IOException{int pt=0,ct=0;double cost=0;StringBuilder content=new StringBuilder();Map<String,Object> payload=s.cached;try{
         if(s.cached!=null){Map<?,?> choice=((List<Map<?,?>>)s.cached.get("choices")).get(0);Map<?,?> msg=(Map<?,?>)choice.get("message");String text=String.valueOf(msg.containsKey("content")?msg.get("content"):"");Map<?,?> cachedUsage=(Map<?,?>)(s.cached.containsKey("usage")?s.cached.get("usage"):Map.of());writeEvent(out,Map.of("id",s.requestId,"object","chat.completion.chunk","model",s.model,"choices",List.of(Map.of("index",0,"delta",Map.of("role","assistant"),"finish_reason",nullSafe()))));writeEvent(out,Map.of("id",s.requestId,"object","chat.completion.chunk","model",s.model,"choices",List.of(Map.of("index",0,"delta",Map.of("content",text),"finish_reason",nullSafe()))));pt=num(cachedUsage.get("prompt_tokens"));ct=num(cachedUsage.get("completion_tokens"));writeEvent(out,Map.of("id",s.requestId,"object","chat.completion.chunk","model",s.model,"choices",List.of(Map.of("index",0,"delta",Map.of(),"finish_reason","stop")),"usage",Map.of("prompt_tokens",pt,"completion_tokens",ct,"total_tokens",pt+ct)));writeDone(out);long ms=(System.nanoTime()-s.started)/1_000_000;log(s.tenant,s.requested,"cache_hit",null,null,pt,ct,0,"hit",false,s.reason,0,ms,s.requestId);return;}
         try(BufferedReader reader=new BufferedReader(new InputStreamReader(s.input,StandardCharsets.UTF_8))){String line;boolean done=false;while((line=reader.readLine())!=null){out.write((line+"\n").getBytes(StandardCharsets.UTF_8));out.flush();if(line.startsWith("data: ")){String data=line.substring(6);if(data.equals("[DONE]")){done=true;continue;}try{Map<String,Object> event=json.readValue(data,Map.class);Object choices=event.get("choices");if(choices instanceof List<?> list&&!list.isEmpty()&&list.get(0) instanceof Map<?,?> choice){Object delta=choice.get("delta");if(delta instanceof Map<?,?> dm&&dm.get("content")!=null)content.append(dm.get("content"));}Object usage=event.get("usage");if(usage instanceof Map<?,?> u){pt=num(u.get("prompt_tokens"));ct=num(u.get("completion_tokens"));}}catch(Exception ignored){}}}if(!done)writeDone(out);}
-        cost=cost(s.model,pt,ct);long ms=(System.nanoTime()-s.started)/1_000_000;log(s.tenant,s.requested,"ok",s.provider,s.model,pt,ct,cost,"miss",s.fallback,s.reason,s.retries,ms,s.requestId);Map<String,Object> response=Map.of("id",s.requestId,"object","chat.completion","model",s.model,"choices",List.of(Map.of("index",0,"message",Map.of("role","assistant","content",content.toString()),"finish_reason","stop")),"usage",Map.of("prompt_tokens",pt,"completion_tokens",ct,"total_tokens",pt+ct));if(s.tenant.cacheEnabled)saveCache(s.tenant,s.requested,s.prompt,response);
+        cost=cost(s.pricingModel,pt,ct);long ms=(System.nanoTime()-s.started)/1_000_000;log(s.tenant,s.requested,"ok",s.provider,s.model,pt,ct,cost,"miss",s.fallback,s.reason,s.retries,ms,s.requestId);Map<String,Object> response=Map.of("id",s.requestId,"object","chat.completion","model",s.model,"choices",List.of(Map.of("index",0,"message",Map.of("role","assistant","content",content.toString()),"finish_reason","stop")),"usage",Map.of("prompt_tokens",pt,"completion_tokens",ct,"total_tokens",pt+ct));if(s.tenant.cacheEnabled)saveCache(s.tenant,s.requested,s.prompt,response);
     }catch(IOException ex){long ms=(System.nanoTime()-s.started)/1_000_000;LOGGER.error("upstream_stream_failed requestId={} provider={} model={} error={}",s.requestId,s.provider,s.model,ex.getClass().getSimpleName());log(s.tenant,s.requested,"upstream_error",s.provider,s.model,pt,ct,cost,"miss",s.fallback,s.reason,s.retries,ms,s.requestId);String err="data: {\"error\":{\"type\":\"upstream_stream_error\",\"message\":\"Upstream stream ended unexpectedly\"}}\n\n";out.write(err.getBytes(StandardCharsets.UTF_8));writeDone(out);}}
     private Object nullSafe(){return "";}
     private void writeEvent(OutputStream out,Map<String,Object> event)throws IOException{out.write(("data: "+json.writeValueAsString(event)+"\n\n").getBytes(StandardCharsets.UTF_8));out.flush();}

@@ -7,7 +7,8 @@ Prism is an OpenAI-compatible LLM gateway with prompt classification, provider f
 - **Backend:** Java 17, Spring Boot 3.4, Spring MVC, PostgreSQL for shared deployments, SQLite for quick local development, SLF4J.
 - **Frontend:** React 19, Vite, Tailwind CSS, Recharts, Lucide.
 - **Local providers:** the supplied mock Alpha and Beta providers. They are free, offline, and support live failure injection.
-- **Persistence:** Flyway-managed PostgreSQL schema in the enterprise Docker deployment; file-based SQLite in the no-setup local run.
+- **Persistence:** Flyway-managed PostgreSQL schema for deployment; file-based SQLite for the no-setup local run. Seeded virtual keys are stored in the database and loaded from the supplied seed file.
+- **Deployment database:** PostgreSQL 17. Compose keeps PostgreSQL private on its internal network; Flyway creates and updates the schema at gateway startup.
 
 The implementation uses package com.dhruva.airtribe.prism. The original Python files and the provided Python verification utilities remain in the repository, but the Prism application runs on the Spring Boot backend.
 
@@ -71,7 +72,7 @@ python scripts/eval_spring_router.py --url http://localhost:8080
 - Cache lookups are isolated by virtual key and requested alias, use normalized word overlap plus a small synonym map, and inspect the newest 500 matching entries. The supplied paraphrase pairs pass the seeded thresholds; the password vs. two-factor near miss does not.
 - Successful upstream responses are cached. Error responses are not. Cache hits have zero provider cost. The cache is stored in the configured database and currently has no TTL or physical eviction policy.
 - Provider-reported token usage drives the cost calculation against model_pricing.json. Client-declared usage is ignored.
-- Monthly spend is updated atomically with a database upsert. A request admitted while budget remains can finish after concurrent in-flight requests take the remaining budget; its final provider cost can therefore overshoot the monthly budget by the cost of concurrent in-flight work.
+- Monthly spend is updated atomically with a database upsert. Per-key admission is serialized through completion and stream usage accounting, so one gateway instance records each request's final cost before admitting the next request for that key.
 - RPM admission uses a synchronized in-process sliding window. It is race-safe for one gateway instance; it is not distributed across instances.
 - SLF4J logs request ID, team, model, status, provider, cache/fallback outcome, retries, token counts, cost, and latency. Raw prompts, virtual keys, and provider credentials are not included in application logs.
 
@@ -94,6 +95,22 @@ Admin endpoints:
 
 Admin endpoints are open for local demo use and should be protected before deployment.
 
+## Build and deploy
+
+Build the Java gateway and React console:
+
+~~~powershell
+cd backend
+mvn clean package
+cd ..\frontend
+npm ci
+npm run build
+~~~
+
+For the provided single-server deployment, install Docker and Docker Compose, set `DATABASE_PASSWORD` in the environment (or copy `.env.example` to `.env` and change it), then run `docker compose up --build -d` from the repository root. The gateway automatically applies PostgreSQL migrations. The console and API are served through `http://<host>:8081`; for example, `GET /health` and `POST /v1/chat/completions`. The PostgreSQL JDBC URL inside Compose is `jdbc:postgresql://db:5432/prism`; keep that database endpoint private. For a managed PostgreSQL database, use `SPRING_PROFILES_ACTIVE=enterprise`, set `DATABASE_URL=jdbc:postgresql://<host>:5432/<database>`, `DATABASE_USERNAME`, and `DATABASE_PASSWORD`, and ensure the gateway host can reach PostgreSQL.
+
+The core demo uses the provided Alpha/Beta mock providers and does not need an external AI key. If `OPENROUTER_API_KEY` is configured, OpenRouter is added as the last fallback while the provided alias order remains intact. Set `OPENROUTER_PREFER_AS_PRIMARY=true` only when intentionally choosing OpenRouter as the primary provider.
+
 ## TDD and verification
 
 See docs/VERIFICATION_REPORT.md for the latest local smoke, load, routing, and failover results.
@@ -105,7 +122,7 @@ cd backend
 mvn test
 ~~~
 
-The tests cover authentication, allowlists, unknown and malformed requests, budget rejection, routing evaluation, the supplied semantic paraphrases and near miss, concurrent RPM admission, retry/failover, provider-based cost calculation, streamed token forwarding, SSE termination, and usage recording.
+The tests cover authentication, allowlists, unknown and malformed requests, persistent seeded keys, concurrent budget admission, budget rejection, routing evaluation, the supplied semantic paraphrases and near miss, concurrent RPM admission, retry/failover, provider-based cost calculation, streamed token forwarding, SSE termination, and usage recording.
 
 With both mock providers and the gateway running, run:
 

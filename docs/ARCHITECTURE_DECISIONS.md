@@ -18,12 +18,12 @@ PostgreSQL is free and open source to run yourself. A managed PostgreSQL service
 
 ## Provider independence
 
-OpenRouter is not a required runtime service. The gateway receives requests first, classifies `auto` prompts locally, then calls an OpenAI-compatible provider selected by its configured alias chain. Alpha/Beta mocks are free fallback providers for local verification. If a remote provider is unavailable, the gateway retries and moves through its configured fallback chain. If every configured provider is unavailable, the completion request returns a clear upstream error while health, usage, logs, and the console remain available.
+The supplied Alpha/Beta mocks and alias configuration are the default path and are sufficient for the required demo. OpenRouter is optional: when `OPENROUTER_API_KEY` is set, it is appended after the configured mock providers. `OPENROUTER_PREFER_AS_PRIMARY=true` explicitly opts into changing the primary route. If every configured provider is unavailable, the completion request returns an upstream error while health, usage, logs, and the console remain available.
 
-The models-list endpoint check only verified OpenRouter connectivity and authorization; Prism does not currently include OpenRouter in its configured chain. To add it, implement/configure an adapter and a fallback chain, then test an actual completion and outage behavior before relying on it.
+Prism uses the same OpenAI-compatible provider adapter for OpenRouter when enabled. The integration test covers prompt forwarding, provider selection, response parsing, price-table accounting, and streaming. A local key is optional; Alpha/Beta remain the configured demo providers.
 
-## Scaling limits to resolve before multiple replicas
+## Request concurrency and scaling limits
 
-PostgreSQL lets multiple gateway instances share durable records, but the current RPM limiter is in memory. Two replicas would each admit requests independently. Before enabling multiple gateway replicas, move request limits to Redis or a PostgreSQL-backed atomic limiter. Monthly totals use database upserts; final provider costs are unknown at admission time, so concurrent in-flight requests can exceed a remaining budget by their eventual cost. Strict financial caps require reserving a conservative amount before calling the provider and reconciling that reservation afterward.
+The RPM limiter uses a synchronized per-key sliding window and is race-safe in one gateway instance. Budget checks and completion accounting are serialized per key through the full response, including streaming, so a second request cannot pass the budget check before the first request's actual provider usage is recorded. This is intentionally single-instance coordination. Before running multiple gateway replicas, move both admission controls to shared atomic storage such as PostgreSQL or Redis.
 
 The local cache uses normalized token overlap, not embedding vectors. Admin APIs are open for the capstone demo. These are deliberate boundaries for the current implementation and must be addressed before treating it as a public, multi-tenant production service.
