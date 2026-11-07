@@ -51,8 +51,21 @@ class GatewayApiTest {
         org.junit.jupiter.api.Assertions.assertTrue(prism.autoRoute("Here is our on-call roster: Monday Priya, Tuesday Chen, Wednesday Amara, Thursday Diego, Friday Fatima, Saturday Lukas, Sunday Mei, next Monday Tom, next Tuesday Sara. Who is on call this Thursday?").startsWith("fast|"));
     }
     @Test void overviewAndEvalApisAreAvailable() throws Exception {
-        mvc.perform(get("/admin/overview")).andExpect(status().isOk()).andExpect(jsonPath("$.active_keys").value(4));
-        mvc.perform(get("/admin/router/eval")).andExpect(status().isOk()).andExpect(jsonPath("$.total").value(20)).andExpect(jsonPath("$.accuracy").value(org.hamcrest.Matchers.greaterThanOrEqualTo(0.9)));
+        String email="admin-"+java.util.UUID.randomUUID()+"@example.com";
+        MvcResult signup=mvc.perform(post("/auth/signup").contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(java.util.Map.of("name","Test Admin","email",email,"password","correct horse battery")))).andExpect(status().isCreated()).andReturn();
+        String token=json.readTree(signup.getResponse().getContentAsByteArray()).path("token").asText();
+        mvc.perform(get("/admin/overview").header("Authorization","Bearer "+token)).andExpect(status().isOk()).andExpect(jsonPath("$.active_keys").value(4));
+        mvc.perform(get("/admin/router/eval").header("Authorization","Bearer "+token)).andExpect(status().isOk()).andExpect(jsonPath("$.total").value(20)).andExpect(jsonPath("$.accuracy").value(org.hamcrest.Matchers.greaterThanOrEqualTo(0.9)));
+    }
+    @Test void signupAndSigninPersistAccountAndProtectAdminApis() throws Exception {
+        String email="signin-"+java.util.UUID.randomUUID()+"@example.com";
+        String signupBody=json.writeValueAsString(java.util.Map.of("name","API User","email",email,"password","correct horse battery"));
+        mvc.perform(post("/auth/signup").contentType(MediaType.APPLICATION_JSON).content(signupBody)).andExpect(status().isCreated());
+        MvcResult login=mvc.perform(post("/auth/signin").contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(java.util.Map.of("email",email,"password","correct horse battery")))).andExpect(status().isOk()).andExpect(jsonPath("$.token").isNotEmpty()).andReturn();
+        String token=json.readTree(login.getResponse().getContentAsByteArray()).path("token").asText();
+        mvc.perform(get("/admin/overview")).andExpect(status().isUnauthorized());
+        mvc.perform(get("/admin/overview").header("Authorization","Bearer "+token)).andExpect(status().isOk());
+        org.junit.jupiter.api.Assertions.assertEquals(1,db.queryForObject("SELECT COUNT(*) FROM auth_users WHERE email=?",Integer.class,email));
     }
     @Test void seededTenantsAreStoredInThePersistentDatabase() {
         org.junit.jupiter.api.Assertions.assertEquals(4, db.queryForObject("SELECT COUNT(*) FROM tenant_keys", Integer.class));

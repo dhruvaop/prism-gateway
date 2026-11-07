@@ -42,6 +42,8 @@ services:
       DATABASE_URL: ${DATABASE_URL:-jdbc:postgresql://db:5432/prism}
       DATABASE_USERNAME: ${DATABASE_USERNAME:-prism}
       DATABASE_PASSWORD: ${DATABASE_PASSWORD:-prism-demo-only}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env before starting Prism}
+      JWT_TTL_SECONDS: ${JWT_TTL_SECONDS:-86400}
       PRISM_DATA_DIR: /app/data
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_PREFER_AS_PRIMARY: ${OPENROUTER_PREFER_AS_PRIMARY:-false}

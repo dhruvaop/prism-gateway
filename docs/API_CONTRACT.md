@@ -28,7 +28,7 @@ Good To Have resources:
 ## Authentication
 
 - Data plane: `Authorization: Bearer <virtual-key>` using keys from `data/seed_keys.json`.
-- Admin plane: any simple documented mechanism (separate admin token is enough).
+- Admin plane: `POST /auth/signup` and `POST /auth/signin` accept JSON account credentials and return `{ "token": "<JWT>", "user": { ... } }`. Send the token as `Authorization: Bearer <JWT>` to `/admin/**`; tokens are signed with `JWT_SECRET` and expire after 24 hours by default. Passwords are BCrypt hashes in the `auth_users` database table. Sign-up requires a name, valid email, and password of 10-72 characters; duplicate email returns 409. Admin routes without a valid token return 401.
 
 ## Core API Flows
 

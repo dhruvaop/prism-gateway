@@ -2,6 +2,7 @@
 """Print the routing evaluation produced by a running Spring Boot Prism gateway."""
 import argparse
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -10,8 +11,10 @@ import urllib.request
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://localhost:8080", help="Spring Boot gateway base URL")
+    parser.add_argument("--token", default=os.environ.get("PRISM_ADMIN_TOKEN", ""), help="dashboard JWT, or set PRISM_ADMIN_TOKEN")
     args = parser.parse_args()
-    request = urllib.request.Request(args.url.rstrip("/") + "/admin/router/eval")
+    headers = {"Authorization": f"Bearer {args.token}"} if args.token else {}
+    request = urllib.request.Request(args.url.rstrip("/") + "/admin/router/eval", headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
             result = json.load(response)

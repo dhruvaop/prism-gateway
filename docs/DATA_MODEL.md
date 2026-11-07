@@ -14,6 +14,17 @@ These files are the canonical seed data. `gateway_config.sample.json` shows one 
 
 ## Entities
 
+### Account (Dashboard Authentication)
+
+- `id` (UUID)
+- `name`
+- `email` (unique, normalized to lowercase)
+- `password_hash` (BCrypt; raw passwords are never stored)
+- `role`
+- `created_at`
+
+Accounts are stored in `auth_users`. The browser receives a signed JWT after sign-up/sign-in; the signing secret is supplied through `JWT_SECRET` and is not stored in the database.
+
 ### Virtual Key (Tenant)
 
 Required fields:
