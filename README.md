@@ -1,97 +1,122 @@
-# Prism Capstone Pack
+# Prism — LLM Gateway & Control Plane
 
-This repository contains a self-contained capstone package for building **Prism**, an AI-first LLM gateway with smart difficulty-based routing, failover, streaming, per-tenant metering, budgets, and a semantic cache. The gateway makes two AI decisions on every request: how hard is this prompt (which model tier deserves it), and have we answered it before (semantic cache).
+Prism is an OpenAI-compatible LLM gateway with prompt classification, provider failover, token streaming, per-key usage and budgets, a tenant-scoped semantic response cache, and a React operations console.
 
-The capstone is language agnostic. You may implement it in Node.js, Java, Python, Go, Ruby, or any stack you are comfortable with, as long as you satisfy the API, correctness, and verification requirements.
+## Stack
 
-## Contents
+- **Backend:** Java 17, Spring Boot 3.4, Spring MVC, SQLite, SLF4J.
+- **Frontend:** React 19, Vite, Tailwind CSS, Recharts, Lucide.
+- **Local providers:** the supplied mock Alpha and Beta providers. They are free, offline, and support live failure injection.
+- **Persistence:** local SQLite database at prism-java.db. No database account or cloud service is required.
 
-- `PRISM_PROBLEM_STATEMENT.md` - capstone problem statement.
-- `docs/IMPLEMENTATION_GUIDE.md` - suggested build order, demo scenarios, and FAQ.
-- `docs/API_CONTRACT.md` - language-agnostic API contract, header contract, and error shapes.
-- `docs/DATA_MODEL.md` - suggested entities, relationships, and storage expectations.
-- `docs/EVALUATION_GUIDE.md` - how your gateway is verified and what to include in the verification report.
-- `data/model_pricing.json` - price table for cost accounting.
-- `data/seed_keys.json` - four seed tenants with budgets, limits, allowlists, and cache settings (including a tiny-budget key for the budget-exhaustion demo).
-- `data/gateway_config.sample.json` - sample provider registry, model aliases, and fallback chains.
-- `data/sample_requests.jsonl` - annotated request bodies, including cache-test prompt pairs and negative cases.
-- `data/routing_eval.jsonl` - 20 labeled prompts for grading the `auto` router, with short-but-hard and long-but-trivial traps.
-- `scripts/mock_provider.py` - zero-dependency OpenAI-compatible mock provider with live failure injection.
-- `scripts/smoke_test.py` - checks your gateway against the required API and header contract.
-- `scripts/load_test.py` - checks rate-limit over-admission and accounting accuracy under concurrency.
-- `scripts/validate_pack.py` - validates that the package data is parseable and internally consistent.
+The implementation uses package com.dhruva.airtribe.prism. The original Python files and the provided Python verification utilities remain in the repository, but the Prism application runs on the Spring Boot backend.
 
-## Optional Local Utilities
+For step-by-step deployment instructions in plain language, see docs/DEPLOYMENT_GUIDE.md.
 
-All scripts use only Python standard library modules (Python 3.9+). From this folder:
+## Run locally
 
-```bash
-python3 scripts/validate_pack.py
-```
+Requirements: Java 17+, Maven 3.9+, Node.js 20.19+ (or 22.12+), and Python 3.9+ for the supplied mock servers and verification scripts.
 
-Start two mock providers (two terminals):
+Start Alpha and Beta in separate PowerShell terminals from the project root:
 
-```bash
-python3 scripts/mock_provider.py --port 9001 --name alpha
-python3 scripts/mock_provider.py --port 9002 --name beta
-```
+~~~powershell
+python scripts/mock_provider.py --port 9001 --name alpha
+python scripts/mock_provider.py --port 9002 --name beta
+~~~
 
-You now have 2 "providers" serving `alpha-small`, `alpha-large`, `beta-small`, `beta-large` — free, offline, and OpenAI-compatible. Try one:
+Start Spring Boot in another terminal:
 
-```bash
-curl -s http://localhost:9001/v1/chat/completions \
-  -H "Authorization: Bearer anything" -H "Content-Type: application/json" \
-  -d '{"model": "alpha-small", "messages": [{"role": "user", "content": "hello"}]}'
-```
+~~~powershell
+cd backend
+mvn spring-boot:run
+~~~
 
-Inject failures live — no restarts needed:
+Start the React console in another terminal:
 
-```bash
-# take alpha down; your gateway should fail over to beta
-curl -s -X POST http://localhost:9001/admin/config -d '{"mode": "down"}'
+~~~powershell
+cd frontend
+npm install
+npm run dev
+~~~
 
-# make alpha slow (3s) - do your timeouts hold?
-curl -s -X POST http://localhost:9001/admin/config -d '{"mode": "ok", "latency_ms": 3000}'
+Open http://localhost:5173. The gateway listens on http://localhost:8080. VITE_API_URL can point the console at a different gateway URL. PRISM_DATA_DIR, PRISM_DB, and PORT configure the seed directory, SQLite file, and backend port.
 
-# make alpha flaky - do your retries handle a 30% error rate?
-curl -s -X POST http://localhost:9001/admin/config -d '{"latency_ms": 0, "fail_rate": 0.3}'
+### Demo keys
 
-# back to healthy
-curl -s -X POST http://localhost:9001/admin/config -d '{"mode": "ok", "fail_rate": 0}'
-```
+| Team | Key | Models | Requests/min | Monthly budget |
+|---|---|---|---:|---:|
+| search | prism-sk-search-1a2b3c | fast | 60 | $50 |
+| research | prism-sk-research-4d5e6f | fast, smart, auto | 300 | $500 |
+| free-tier | prism-sk-free-7g8h9i | fast | 10 | $5 |
+| budget-demo | prism-sk-budget-demo-0j1k2l | fast | 60 | $0.00001 |
 
-Verify your gateway once it is running:
+Keys, aliases, prices, and provider endpoints load from the supplied data JSON files. Seed values are preserved for the demo scripts.
 
-```bash
-python3 scripts/smoke_test.py --url http://localhost:8080 --key prism-sk-search-1a2b3c --model fast
-python3 scripts/load_test.py  --url http://localhost:8080 --key prism-sk-free-7g8h9i --model fast --requests 30 --concurrency 10 --rpm-limit 10
-```
+## Request routing and failover
 
-The mock providers are the intended upstreams for development, demos, and load testing — they cost nothing and make failover deterministic. You may swap one for a real provider (or Ollama) if you want.
+fast and smart map to their configured primary and ordered fallback models. Prism attempts the primary provider up to three times for retryable errors (including timeouts and 429/5xx responses), using exponential backoff from gateway_config.sample.json; then it advances to the next provider. Responses identify the serving provider and set x-prism-fallback when a fallback served the request. Provider credentials are held server-side.
 
-## Language-Agnostic Expectations
+For model: "auto", a deterministic classifier runs before model resolution. It uses reasoning, proof, estimation, distributed-systems, extraction, lookup, and rewrite signals instead of prompt length alone. It records the tier and the matched reason in request logs. The classifier reads the prompt, never the evaluation labels.
 
-Your implementation should provide:
+Run the 20-case routing report while the gateway is running:
 
-- An OpenAI-compatible `POST /v1/chat/completions` data plane matching `docs/API_CONTRACT.md`, including the `x-prism-*` header contract.
-- Streaming pass-through without buffering.
-- Virtual-key authentication with per-key allowlists, rate limits, and monthly budgets.
-- Alias-based routing with retries and provider failover.
-- An `auto` alias that classifies prompt difficulty and routes to a model tier, evaluated against `data/routing_eval.jsonl`.
-- A per-tenant semantic response cache.
-- Accurate cost metering, request logs, and a usage API.
-- A lightweight ops console for usage, recent requests, and cache stats.
-- A provider adapter that can be mocked in tests.
+~~~powershell
+python scripts/eval_spring_router.py --url http://localhost:8080
+~~~
 
-The console can be vibe-coded or AI-assisted. It does not need to be visually complex, but it should let you demonstrate usage by key, recent traffic, and cache hit rates.
+## Cache, metering, and logs
 
-## Recommended Reading Order
+- Cache lookups are isolated by virtual key and requested alias, use normalized word overlap plus a small synonym map, and inspect the newest 500 matching entries. The supplied paraphrase pairs pass the seeded thresholds; the password vs. two-factor near miss does not.
+- Successful upstream responses are cached. Error responses are not. Cache hits have zero provider cost. The cache is stored in SQLite and currently has no TTL or physical eviction policy.
+- Provider-reported token usage drives the cost calculation against model_pricing.json. Client-declared usage is ignored.
+- Monthly spend is updated atomically with a SQLite upsert. A request admitted while budget remains can finish after concurrent in-flight requests take the remaining budget; its final provider cost can therefore overshoot the monthly budget by the cost of concurrent in-flight work.
+- RPM admission uses a synchronized in-process sliding window. It is race-safe for one gateway instance; it is not distributed across instances.
+- SLF4J logs request ID, team, model, status, provider, cache/fallback outcome, retries, token counts, cost, and latency. Raw prompts, virtual keys, and provider credentials are not included in application logs.
 
-1. Read `PRISM_PROBLEM_STATEMENT.md`.
-2. Follow `docs/IMPLEMENTATION_GUIDE.md` for the build path.
-3. Use `docs/API_CONTRACT.md` and `docs/DATA_MODEL.md` while designing your implementation.
-4. Use `docs/EVALUATION_GUIDE.md` before running the verification scripts and writing your report.
+## API
 
-## Correctness Notes
+POST /v1/chat/completions accepts OpenAI-shaped messages and fast, smart, auto, or a configured provider model. It supports streaming with stream: true; SSE chunks pass through as they arrive and terminate with data: [DONE].
 
-The pack is designed to expose the classic gateway failure modes: buffered "streaming", read-then-write rate limiters that over-admit under concurrency, cost computed from client-declared tokens, caches shared across tenants, and gateways that hang when a provider goes silent. The smoke test, load test, and live failure injection exist so you can prove your implementation does not have them.
+Every completion returns x-prism-provider, x-prism-cache, and x-prism-fallback. Non-streaming completions also return x-prism-cost-usd; streaming usage and cost are recorded after the stream completes.
+
+Admin endpoints:
+
+- GET /health
+- GET /admin/overview
+- GET /admin/usage?key=<virtual-key>
+- GET /admin/logs?key=<virtual-key>&limit=100
+- GET /admin/cache/stats
+- GET /admin/keys
+- GET /admin/providers/health
+- GET /admin/router/eval
+
+Admin endpoints are open for local demo use and should be protected before deployment.
+
+## TDD and verification
+
+See docs/VERIFICATION_REPORT.md for the latest local smoke, load, routing, and failover results.
+
+Run the Spring Boot tests:
+
+~~~powershell
+cd backend
+mvn test
+~~~
+
+The tests cover authentication, allowlists, unknown and malformed requests, budget rejection, routing evaluation, the supplied semantic paraphrases and near miss, concurrent RPM admission, retry/failover, provider-based cost calculation, streamed token forwarding, SSE termination, and usage recording.
+
+With both mock providers and the gateway running, run:
+
+~~~powershell
+python scripts/smoke_test.py --url http://localhost:8080 --key prism-sk-search-1a2b3c --model fast
+python scripts/load_test.py --url http://localhost:8080 --key prism-sk-free-7g8h9i --model fast --requests 30 --concurrency 10 --rpm-limit 10
+python scripts/eval_spring_router.py --url http://localhost:8080
+~~~
+
+Failure injection is provided by the mock servers. For example, take Alpha down and send a completion to observe Beta serving it:
+
+~~~powershell
+Invoke-RestMethod -Method Post -Uri http://localhost:9001/admin/config -ContentType 'application/json' -Body '{"mode":"down"}'
+~~~
+
+Restore Alpha with {"mode":"ok","fail_rate":0}.

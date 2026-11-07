@@ -1,0 +1,9 @@
+{
+  "name": "prism-ops-console",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": { "dev": "vite --host 0.0.0.0", "build": "vite build", "preview": "vite preview --host 0.0.0.0" },
+  "dependencies": { "@vitejs/plugin-react": "6.2.1", "vite": "8.3.6", "react": "19.3.1", "react-dom": "19.3.1", "lucide-react": "1.70.0", "recharts": "3.10.1" },
+  "devDependencies": { "tailwindcss": "3.4.19", "postcss": "8.5.32", "autoprefixer": "10.6.2" }
+}
