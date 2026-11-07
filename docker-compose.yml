@@ -39,8 +39,8 @@ services:
     environment:
       PORT: "8080"
       SPRING_PROFILES_ACTIVE: enterprise
-      DATABASE_URL: jdbc:postgresql://db:5432/prism
-      DATABASE_USERNAME: prism
+      DATABASE_URL: ${DATABASE_URL:-jdbc:postgresql://db:5432/prism}
+      DATABASE_USERNAME: ${DATABASE_USERNAME:-prism}
       DATABASE_PASSWORD: ${DATABASE_PASSWORD:-prism-demo-only}
       PRISM_DATA_DIR: /app/data
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
