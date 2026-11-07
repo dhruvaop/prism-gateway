@@ -67,6 +67,10 @@ class GatewayApiTest {
         mvc.perform(get("/admin/overview").header("Authorization","Bearer "+token)).andExpect(status().isOk());
         org.junit.jupiter.api.Assertions.assertEquals(1,db.queryForObject("SELECT COUNT(*) FROM auth_users WHERE email=?",Integer.class,email));
     }
+    @Test void adminCorsPreflightIsAllowedWithoutJwt() throws Exception {
+        mvc.perform(options("/admin/overview").header("Origin","http://localhost:5173").header("Access-Control-Request-Method","GET").header("Access-Control-Request-Headers","authorization"))
+                .andExpect(status().isOk()).andExpect(header().string("Access-Control-Allow-Origin","http://localhost:5173"));
+    }
     @Test void seededTenantsAreStoredInThePersistentDatabase() {
         org.junit.jupiter.api.Assertions.assertEquals(4, db.queryForObject("SELECT COUNT(*) FROM tenant_keys", Integer.class));
         org.junit.jupiter.api.Assertions.assertEquals("search", db.queryForObject("SELECT team FROM tenant_keys WHERE virtual_key=?", String.class, "prism-sk-search-1a2b3c"));

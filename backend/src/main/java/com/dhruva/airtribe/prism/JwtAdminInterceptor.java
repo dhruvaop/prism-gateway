@@ -4,6 +4,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.HandlerInterceptor;
+import org.springframework.web.cors.CorsUtils;
 
 import java.io.IOException;
 
@@ -13,6 +14,7 @@ public class JwtAdminInterceptor implements HandlerInterceptor {
     public JwtAdminInterceptor(AuthService auth) { this.auth = auth; }
 
     @Override public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws IOException {
+        if (CorsUtils.isPreFlightRequest(request)) return true;
         String header = request.getHeader("Authorization");
         if (header != null && header.startsWith("Bearer ") && auth.isValidToken(header.substring(7).trim())) return true;
         response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
