@@ -30,6 +30,7 @@ public class PrismService {
     private final JdbcTemplate db;
     private final ObjectMapper json = new ObjectMapper();
     @Value("${prism.data-dir}") private String dataDir;
+    @Value("${spring.datasource.url}") private String databaseUrl;
     @Value("${prism.upstream-timeout-ms}") private int timeoutMs;
     @Value("${prism.retry.max-attempts:3}") private int maxAttempts;
     @Value("${prism.retry.initial-backoff-ms:200}") private int initialBackoffMs;
@@ -44,14 +45,17 @@ public class PrismService {
     public PrismService(JdbcTemplate db) { this.db = db; }
 
     @PostConstruct public void initialize() throws Exception {
-        db.execute("PRAGMA journal_mode=WAL"); db.execute("PRAGMA busy_timeout=10000");
-        db.execute("CREATE TABLE IF NOT EXISTS request_logs(request_id TEXT PRIMARY KEY, virtual_key TEXT, team TEXT, requested_model TEXT, resolved_provider TEXT, resolved_model TEXT, status TEXT, prompt_tokens INTEGER DEFAULT 0, completion_tokens INTEGER DEFAULT 0, cost_usd REAL DEFAULT 0, cache TEXT, fallback INTEGER DEFAULT 0, route_reason TEXT, retries INTEGER DEFAULT 0, latency_ms INTEGER DEFAULT 0, created_at TEXT)");
-        db.execute("CREATE TABLE IF NOT EXISTS usage_monthly(virtual_key TEXT, month TEXT, team TEXT, requests INTEGER DEFAULT 0, prompt_tokens INTEGER DEFAULT 0, completion_tokens INTEGER DEFAULT 0, cost_usd REAL DEFAULT 0, cache_hits INTEGER DEFAULT 0, PRIMARY KEY(virtual_key,month))");
-        try { db.execute("ALTER TABLE usage_monthly ADD COLUMN team TEXT"); } catch (Exception ignored) { }
-        db.execute("CREATE TABLE IF NOT EXISTS cache_entries(id INTEGER PRIMARY KEY AUTOINCREMENT, virtual_key TEXT, model TEXT, prompt TEXT, response TEXT, created_at TEXT, hit_count INTEGER DEFAULT 0)");
+        DatabaseDialect.Kind database=DatabaseDialect.detect(databaseUrl);
+        if(database==DatabaseDialect.Kind.SQLITE){
+            db.execute("PRAGMA journal_mode=WAL"); db.execute("PRAGMA busy_timeout=10000");
+            db.execute("CREATE TABLE IF NOT EXISTS request_logs(request_id TEXT PRIMARY KEY, virtual_key TEXT, team TEXT, requested_model TEXT, resolved_provider TEXT, resolved_model TEXT, status TEXT, prompt_tokens INTEGER DEFAULT 0, completion_tokens INTEGER DEFAULT 0, cost_usd DOUBLE PRECISION DEFAULT 0, cache TEXT, fallback INTEGER DEFAULT 0, route_reason TEXT, retries INTEGER DEFAULT 0, latency_ms INTEGER DEFAULT 0, created_at TEXT)");
+            db.execute("CREATE TABLE IF NOT EXISTS usage_monthly(virtual_key TEXT, month TEXT, team TEXT, requests INTEGER DEFAULT 0, prompt_tokens INTEGER DEFAULT 0, completion_tokens INTEGER DEFAULT 0, cost_usd DOUBLE PRECISION DEFAULT 0, cache_hits INTEGER DEFAULT 0, PRIMARY KEY(virtual_key,month))");
+            try { db.execute("ALTER TABLE usage_monthly ADD COLUMN team TEXT"); } catch (Exception ignored) { }
+            db.execute(DatabaseDialect.cacheTableSql(database));
+        }
         Path root = Paths.get(dataDir).toAbsolutePath().normalize();
         loadTenants(root.resolve("seed_keys.json")); loadConfig(root.resolve("gateway_config.sample.json")); loadPrices(root.resolve("model_pricing.json"));
-        LOGGER.info("prism_initialized tenants={} providers={} aliases={} pricedModels={} database=sqlite",tenants.size(),providers.size(),aliases.size(),prices.size());
+        LOGGER.info("prism_initialized tenants={} providers={} aliases={} pricedModels={} database={}",tenants.size(),providers.size(),aliases.size(),prices.size(),database.name().toLowerCase(Locale.ROOT));
     }
     private JsonNode read(Path p) throws IOException { return json.readTree(Files.readAllBytes(p)); }
     private void loadTenants(Path p) throws IOException {
@@ -77,7 +81,7 @@ public class PrismService {
     public record StreamSession(InputStream input,Map<String,Object> cached,Tenant tenant,String requested,String prompt,String model,String provider,boolean fallback,String reason,int retries,String requestId,long started) {}
 
     public synchronized void log(Tenant t,String requested,String status,String provider,String model,int pt,int ct,double cost,String cache,boolean fallback,String reason,int retries,long latency,String id) {
-        String now=Instant.now().toString(); db.update("INSERT OR REPLACE INTO request_logs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",id,t==null?null:t.key,t==null?null:t.team,requested,provider,model,status,pt,ct,cost,cache,fallback?1:0,reason,retries,latency,now);
+        String now=Instant.now().toString(); db.update("INSERT INTO request_logs(request_id,virtual_key,team,requested_model,resolved_provider,resolved_model,status,prompt_tokens,completion_tokens,cost_usd,cache,fallback,route_reason,retries,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(request_id) DO UPDATE SET virtual_key=excluded.virtual_key,team=excluded.team,requested_model=excluded.requested_model,resolved_provider=excluded.resolved_provider,resolved_model=excluded.resolved_model,status=excluded.status,prompt_tokens=excluded.prompt_tokens,completion_tokens=excluded.completion_tokens,cost_usd=excluded.cost_usd,cache=excluded.cache,fallback=excluded.fallback,route_reason=excluded.route_reason,retries=excluded.retries,latency_ms=excluded.latency_ms,created_at=excluded.created_at",id,t==null?null:t.key,t==null?null:t.team,requested,provider,model,status,pt,ct,cost,cache,fallback?1:0,reason,retries,latency,now);
         if(t!=null && (status.equals("ok")||status.equals("cache_hit"))) db.update("INSERT INTO usage_monthly(virtual_key,month,team,requests,prompt_tokens,completion_tokens,cost_usd,cache_hits) VALUES(?,?,?,1,?,?,?,?) ON CONFLICT(virtual_key,month) DO UPDATE SET team=excluded.team,requests=requests+1,prompt_tokens=prompt_tokens+excluded.prompt_tokens,completion_tokens=completion_tokens+excluded.completion_tokens,cost_usd=cost_usd+excluded.cost_usd,cache_hits=cache_hits+excluded.cache_hits",t.key,YearMonth.now(ZoneOffset.UTC).toString(),t.team,pt,ct,cost,status.equals("cache_hit")?1:0);
         LOGGER.info("gateway_request requestId={} team={} model={} status={} provider={} cache={} fallback={} retries={} promptTokens={} completionTokens={} costUsd={} latencyMs={}",id,t==null?"unknown":t.team,requested,status,provider==null?"none":provider,cache,fallback,retries,pt,ct,String.format(Locale.US,"%.9f",cost),latency);
     }

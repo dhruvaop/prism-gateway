@@ -4,14 +4,16 @@ Prism is an OpenAI-compatible LLM gateway with prompt classification, provider f
 
 ## Stack
 
-- **Backend:** Java 17, Spring Boot 3.4, Spring MVC, SQLite, SLF4J.
+- **Backend:** Java 17, Spring Boot 3.4, Spring MVC, PostgreSQL for shared deployments, SQLite for quick local development, SLF4J.
 - **Frontend:** React 19, Vite, Tailwind CSS, Recharts, Lucide.
 - **Local providers:** the supplied mock Alpha and Beta providers. They are free, offline, and support live failure injection.
-- **Persistence:** local SQLite database at prism-java.db. No database account or cloud service is required.
+- **Persistence:** Flyway-managed PostgreSQL schema in the enterprise Docker deployment; file-based SQLite in the no-setup local run.
 
 The implementation uses package com.dhruva.airtribe.prism. The original Python files and the provided Python verification utilities remain in the repository, but the Prism application runs on the Spring Boot backend.
 
-For step-by-step deployment instructions in plain language, see docs/DEPLOYMENT_GUIDE.md.
+For step-by-step deployment instructions in plain language, see docs/DEPLOYMENT_GUIDE.md. The Docker Compose deployment uses PostgreSQL; the quick local Maven run continues to use SQLite.
+
+See docs/ARCHITECTURE_DECISIONS.md for the first-principles database and provider-independence decisions.
 
 ## Run locally
 
@@ -39,7 +41,7 @@ npm install
 npm run dev
 ~~~
 
-Open http://localhost:5173. The gateway listens on http://localhost:8080. VITE_API_URL can point the console at a different gateway URL. PRISM_DATA_DIR, PRISM_DB, and PORT configure the seed directory, SQLite file, and backend port.
+Open http://localhost:5173. The gateway listens on http://localhost:8080. VITE_API_URL can point the console at a different gateway URL. PRISM_DATA_DIR, PRISM_DB, and PORT configure the seed directory, local SQLite file, and backend port.
 
 ### Demo keys
 
@@ -67,9 +69,9 @@ python scripts/eval_spring_router.py --url http://localhost:8080
 ## Cache, metering, and logs
 
 - Cache lookups are isolated by virtual key and requested alias, use normalized word overlap plus a small synonym map, and inspect the newest 500 matching entries. The supplied paraphrase pairs pass the seeded thresholds; the password vs. two-factor near miss does not.
-- Successful upstream responses are cached. Error responses are not. Cache hits have zero provider cost. The cache is stored in SQLite and currently has no TTL or physical eviction policy.
+- Successful upstream responses are cached. Error responses are not. Cache hits have zero provider cost. The cache is stored in the configured database and currently has no TTL or physical eviction policy.
 - Provider-reported token usage drives the cost calculation against model_pricing.json. Client-declared usage is ignored.
-- Monthly spend is updated atomically with a SQLite upsert. A request admitted while budget remains can finish after concurrent in-flight requests take the remaining budget; its final provider cost can therefore overshoot the monthly budget by the cost of concurrent in-flight work.
+- Monthly spend is updated atomically with a database upsert. A request admitted while budget remains can finish after concurrent in-flight requests take the remaining budget; its final provider cost can therefore overshoot the monthly budget by the cost of concurrent in-flight work.
 - RPM admission uses a synchronized in-process sliding window. It is race-safe for one gateway instance; it is not distributed across instances.
 - SLF4J logs request ID, team, model, status, provider, cache/fallback outcome, retries, token counts, cost, and latency. Raw prompts, virtual keys, and provider credentials are not included in application logs.
 

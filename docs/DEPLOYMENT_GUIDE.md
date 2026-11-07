@@ -4,12 +4,13 @@ This guide explains how to build Prism, try it on your computer, and put the dem
 
 ## What is running?
 
-Prism runs as four small services:
+Prism runs as five small services in the Docker deployment:
 
-1. **Gateway** — the Java/Spring Boot service that receives app requests, chooses a model, meters usage, and writes records to SQLite.
+1. **Gateway** — the Java/Spring Boot service that receives app requests, chooses a model, meters usage, and writes records to the database.
 2. **Operations console** — the React website used to view activity and send test prompts.
 3. **Alpha mock provider** — a free fake model service used as the first provider.
 4. **Beta mock provider** — a second free fake model service used when Alpha fails.
+5. **PostgreSQL database** — the shared store for usage, cache, and request records.
 
 The two mock providers return predictable sample responses. They demonstrate the gateway flow; they are not real AI models.
 
@@ -21,7 +22,7 @@ Install Docker Desktop (or Docker Engine with the Compose plugin), open a termin
 docker compose up --build
 ~~~
 
-The first build downloads Java, Node, and Python base images and the app libraries. It may take a few minutes. When the services finish starting, open:
+The first build downloads Java, Node, Python, and PostgreSQL images and the app libraries. It may take a few minutes. Compose waits for PostgreSQL, applies the database migration, and then starts the gateway. When the services finish starting, open:
 
 - Operations console: http://localhost:8081
 - Gateway health check: http://localhost:8081/health
@@ -29,13 +30,13 @@ The first build downloads Java, Node, and Python base images and the app librari
 
 The browser goes to the console, and the web server forwards API calls to the Java gateway. That is why the same URLs work without setting up a separate API address.
 
-Leave that terminal open while using Prism. To stop the services, press Ctrl+C. The SQLite database is in a Docker volume named prism-data, so restarting the containers does not erase usage history. To deliberately erase that demo database, run:
+Leave that terminal open while using Prism. To stop the services, press Ctrl+C. The PostgreSQL database is in a Docker volume named prism-postgres, so restarting the containers does not erase usage history. To deliberately erase that demo database, run:
 
 ~~~sh
 docker compose down -v
 ~~~
 
-This command deletes the saved Prism database volume.
+This command deletes the saved Prism database volume. Before making the site public, copy .env.example to .env and replace the demo database password with a long random value.
 
 ## Run the individual services without Docker
 
@@ -97,15 +98,16 @@ For a small class demo, use a single Linux server with Docker and Docker Compose
 2. Keep the Compose file, Dockerfiles, deploy folder, scripts/mock_provider.py, and data folder together.
 3. Run docker compose up --build -d from the project folder.
 4. Point a domain name to the server and put HTTPS in front of port 8081 with a reverse proxy such as Caddy or Nginx.
-5. Open the HTTPS site and check its /health page.
+5. Create the root .env file from .env.example and set a strong database password.
+6. Open the HTTPS site and check its /health page.
 
 The included compose file is for demonstration with mock providers. Keep mock provider ports private in a public deployment; remove their host port mappings after your demo. The console and Java API are intentionally served together through the web server.
 
 ## Before showing it publicly
 
-The seed virtual keys are examples for local demos. Replace them before inviting outside users. Admin endpoints currently have no login, and the gateway is designed as a single-instance capstone service. Do not expose the admin endpoints to the public internet without adding authentication. Keep the SQLite volume on persistent disk and back it up. Running multiple gateway copies against separate local SQLite files would create separate usage and rate-limit totals.
+The seed virtual keys are examples for local demos. Replace them before inviting outside users. Admin endpoints currently have no login, and the gateway is designed as a single-instance capstone service. Do not expose the admin endpoints to the public internet without adding authentication. Keep the PostgreSQL volume on persistent disk and back it up. PostgreSQL is shared by service replicas; the in-memory requests-per-minute limiter is still per gateway instance, so use Redis or a database-backed limiter before running multiple gateway replicas.
 
-To use a real AI provider, connect an OpenAI-compatible provider through the provider adapter and configure its key as a server-side secret. Never put provider keys in the React app, browser requests, public source control, or request logs. This Compose setup uses only the free mock providers and does not send prompts to a paid model.
+To use a real AI provider, connect an OpenAI-compatible provider through the provider adapter and configure its key as a server-side secret. Never put provider keys in the React app, browser requests, public source control, or request logs. This Compose setup uses only the free mock providers and does not send prompts to a paid model. Prism does not depend on OpenRouter; when it is unavailable, the configured provider chain can still use Alpha/Beta or another configured OpenAI-compatible provider.
 
 ## Demo keys and request example
 
