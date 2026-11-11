@@ -50,13 +50,24 @@ routing so requests do not point at `localhost:9001/9002`.
 
 ### 2. Deploy the console and chat
 
-1. In Cloudflare Pages, connect the same repository.
-2. Build command:
+Build the static console first. The backend URL is compiled into the bundle, so
+set `VITE_API_URL` at build time:
 
 ```sh
-cd frontend && npm ci && npm run build
+cd frontend
+npm ci
+VITE_API_URL=https://<your-render-service>.onrender.com npm run build
+cd ..
 ```
 
+Do not add a trailing slash to `VITE_API_URL`. Rebuild after changing it. The
+build writes `frontend/dist/index.html` (admin console at `/`) and
+`frontend/dist/chat.html` (chat at `/chat.html`).
+
+#### Option A1 — Cloudflare Pages (dashboard)
+
+1. In Cloudflare Pages, connect the same repository.
+2. Build command: `cd frontend && npm ci && npm run build`
 3. Output directory: `frontend/dist`
 4. Environment variable:
 
@@ -64,10 +75,28 @@ cd frontend && npm ci && npm run build
 VITE_API_URL=https://<your-render-service>.onrender.com
 ```
 
-Do not add a trailing slash. Rebuild after changing it.
-
 5. Copy the Pages URL into Render's `PRISM_CORS_ORIGINS` and redeploy the
    backend. Multiple origins are comma-separated.
+
+#### Option A2 — Cloudflare Workers with Wrangler
+
+The repository ships a root `wrangler.jsonc` that deploys the already-built
+`frontend/dist` as static assets with SPA fallback, so the admin console routes
+and `/chat.html` work without extra rules.
+
+1. Build the static console as shown above, with `VITE_API_URL` set.
+2. From the repository root, deploy:
+
+```sh
+npx wrangler@latest deploy
+```
+
+3. Wrangler prints the deployed `https://<name>.<account>.workers.dev` URL. Add
+   that origin to `PRISM_CORS_ORIGINS` and redeploy the backend.
+
+Wrangler uploads the files in `frontend/dist`; it does not run the Vite build
+for you. Run `npm run build` first. If the config lives at the root, keep
+`assets.directory` pointed at `./frontend/dist` (do not change it to `./dist`).
 
 ### 3. Finish the live integrations
 
@@ -75,8 +104,8 @@ Do not add a trailing slash. Rebuild after changing it.
   `https://<your-render-service>.onrender.com/webhooks/razorpay` and use the
   same secret as `RAZORPAY_WEBHOOK_SECRET`.
 - The admin console and chat must both be served over HTTPS for live Checkout.
-- Open `https://<pages-project>.pages.dev/` and sign in. Chat is at
-  `https://<pages-project>.pages.dev/chat.html`.
+- Open the Pages project URL or the Workers `*.workers.dev` URL and sign in.
+  Chat is at `/chat.html` on the same origin.
 
 ### Caveat: the 17:00 purge and Render sleep
 
@@ -162,4 +191,5 @@ the `db` service and its `depends_on` entry to save VM memory.
 - `Dockerfile` — root build context; includes `data/` in the runtime image.
 - `.dockerignore` — keeps the image build small.
 - `render.yaml` — optional Render Blueprint for the backend and static site.
+- `wrangler.jsonc` — root Workers static-assets config; deploys `frontend/dist`.
 - `PRISM_CORS_ORIGINS` — configurable allowlist in `CorsConfig.java`.
