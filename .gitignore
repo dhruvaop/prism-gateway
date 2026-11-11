@@ -30,6 +30,7 @@ test-output*.txt
 *.db
 *.db-shm
 *.db-wal
+*.db.bak-*
 
 # --- Python ---
 __pycache__/

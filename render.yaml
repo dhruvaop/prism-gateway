@@ -18,6 +18,8 @@ services:
     envVars:
       - key: SPRING_PROFILES_ACTIVE
         value: enterprise
+      - key: PRISM_REQUIRE_POSTGRES
+        value: "true"
       - key: DATABASE_URL
         sync: false
       - key: DATABASE_USERNAME

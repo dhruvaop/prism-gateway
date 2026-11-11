@@ -55,6 +55,7 @@ public class PrismService {
     @Value("${openai.model:gpt-4o-mini}") private String openAiModel;
     private final TaskRouter taskRouter = new TaskRouter();
     @Value("${spring.datasource.url}") private String databaseUrl;
+    @Value("${prism.require-postgres:false}") private boolean requirePostgres;
     @Value("${prism.upstream-timeout-ms}") private int timeoutMs;
     @Value("${prism.retry.max-attempts:3}") private int maxAttempts;
     @Value("${prism.retry.initial-backoff-ms:200}") private int initialBackoffMs;
@@ -84,6 +85,11 @@ public class PrismService {
 
     @PostConstruct public void initialize() throws Exception {
         DatabaseDialect.Kind database=DatabaseDialect.detect(databaseUrl);
+        if(database==DatabaseDialect.Kind.SQLITE&&requirePostgres){
+            throw new IllegalStateException("Refusing to start on SQLite because PRISM_REQUIRE_POSTGRES=true. "
+                    +"Set SPRING_PROFILES_ACTIVE=enterprise and configure DATABASE_URL, DATABASE_USERNAME and DATABASE_PASSWORD. "
+                    +"A missing profile must not create a disposable database.");
+        }
         if(database==DatabaseDialect.Kind.SQLITE){
             db.execute("PRAGMA journal_mode=WAL"); db.execute("PRAGMA busy_timeout=10000");
             db.execute("CREATE TABLE IF NOT EXISTS tenant_keys(virtual_key TEXT PRIMARY KEY,team TEXT NOT NULL,monthly_budget_usd DOUBLE PRECISION NOT NULL,requests_per_minute INTEGER NOT NULL,tokens_per_minute INTEGER NOT NULL,model_allowlist TEXT NOT NULL,cache_enabled INTEGER NOT NULL,similarity_threshold DOUBLE PRECISION NOT NULL,enabled INTEGER NOT NULL DEFAULT 1)");
@@ -94,7 +100,9 @@ public class PrismService {
             db.execute("CREATE TABLE IF NOT EXISTS cache_hits(id INTEGER PRIMARY KEY AUTOINCREMENT,virtual_key TEXT NOT NULL,model TEXT NOT NULL,prompt TEXT NOT NULL,similarity DOUBLE PRECISION NOT NULL,cache_entry_id INTEGER,created_at TEXT NOT NULL)");
             db.execute("CREATE TABLE IF NOT EXISTS auth_users(id TEXT PRIMARY KEY,name TEXT NOT NULL,email TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'ADMIN',created_at TEXT NOT NULL)");
             addColumn("ALTER TABLE auth_users ADD COLUMN username TEXT");
-            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS auth_users_username_idx ON auth_users(username)");
+            addColumn("CREATE UNIQUE INDEX IF NOT EXISTS auth_users_username_idx ON auth_users(username)");
+            addColumn("CREATE UNIQUE INDEX IF NOT EXISTS auth_users_email_lower_idx ON auth_users(lower(email))");
+            addColumn("CREATE UNIQUE INDEX IF NOT EXISTS auth_users_username_lower_idx ON auth_users(lower(username)) WHERE username IS NOT NULL");
             initializeManagedSchema();
         }
         Path root = Paths.get(dataDir).toAbsolutePath().normalize();

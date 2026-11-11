@@ -48,10 +48,18 @@ public class AuthService {
     }
 
     public AuthResponse signIn(String emailOrUsername, String password) {
-        String login = emailOrUsername == null ? "" : emailOrUsername.trim().toLowerCase(java.util.Locale.ROOT);
-        var matches = db.query("SELECT id,name,email,password_hash,role FROM auth_users WHERE lower(email)=? OR lower(username)=?",
-                (rs, row) -> new UserPassword(new AuthUser(rs.getString("id"), rs.getString("name"), rs.getString("email"), rs.getString("role")), rs.getString("password_hash")), login, login);
-        if (matches.isEmpty() || password == null || !passwords.matches(password, matches.get(0).passwordHash())) {
+        String login = emailOrUsername == null ? "" : emailOrUsername.trim();
+        if (login.isEmpty() || password == null || password.isEmpty()) {
+            LOGGER.warn("auth_signin_rejected reason=missing_credentials");
+            throw new AuthException(401, "Username/email or password is incorrect.");
+        }
+        // An email and a username are different namespaces. Pick exactly one
+        // column so one input can never match two accounts.
+        String lookup = login.contains("@") ? "lower(email)" : "lower(username)";
+        var matches = db.query("SELECT id,name,email,password_hash,role FROM auth_users WHERE " + lookup + "=?",
+                (rs, row) -> new UserPassword(new AuthUser(rs.getString("id"), rs.getString("name"), rs.getString("email"), rs.getString("role")), rs.getString("password_hash")),
+                login.toLowerCase(java.util.Locale.ROOT));
+        if (matches.size() != 1 || !passwords.matches(password, matches.get(0).passwordHash())) {
             LOGGER.warn("auth_signin_rejected reason=invalid_credentials");
             throw new AuthException(401, "Username/email or password is incorrect.");
         }
