@@ -3,6 +3,10 @@
 # Frontend: static Vite build (admin console at /, chat at /chat.html).
 # Database: use the existing Supabase project; do not use Render's free
 # Postgres because Render deletes free databases after 30 days.
+#
+# Secret values (API keys, database credentials, Razorpay secrets) use
+# `sync: false`: Render prompts for them when the Blueprint is created and
+# never stores them in this repository.
 services:
   - type: web
     name: prism-gateway
@@ -21,7 +25,7 @@ services:
       - key: DATABASE_PASSWORD
         sync: false
       - key: JWT_SECRET
-        generateValue: true
+        sync: false
       - key: JAVA_TOOL_OPTIONS
         value: "-Xms96m -Xmx300m -XX:MaxMetaspaceSize=128m"
       - key: DATABASE_POOL_MAX
@@ -29,13 +33,17 @@ services:
       - key: PRISM_CACHE_MEMORY_MAX_ENTRIES
         value: "300"
       - key: PRISM_CORS_ORIGINS
-        sync: false
-      - key: OPENROUTER_API_KEY
-        sync: false
+        value: "https://prism-gateway.dhruvabhattacharya407.workers.dev"
       - key: GEMINI_API_KEY
         sync: false
+      - key: GEMINI_MODEL
+        value: "gemini-3.1-flash-lite"
+      - key: GEMINI_PREFER_AS_PRIMARY
+        value: "true"
+      - key: OPENROUTER_API_KEY
+        sync: false
       - key: OPENROUTER_PREFER_AS_PRIMARY
-        value: "false"
+        value: "true"
       - key: RAZORPAY_PAY_KEY_ID
         sync: false
       - key: RAZORPAY_PAY_KEY_SECRET
@@ -44,6 +52,8 @@ services:
         sync: false
       - key: RAZORPAY_WEBHOOK_SECRET
         sync: false
+      - key: PRISM_TRIAL_REQUESTS
+        value: "5"
 
   - type: web
     name: prism-console

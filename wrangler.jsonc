@@ -1,5 +1,5 @@
 {
-  "name": "prism-ops-console",
+  "name": "prism-gateway",
   "compatibility_date": "2026-11-01",
   "assets": {
     "directory": "./frontend/dist",
