@@ -44,17 +44,31 @@ public class JwtTokenService {
     }
 
     public boolean isValid(String token) {
+        return claims(token) != null;
+    }
+
+    public boolean isAdmin(String token) {
+        Map<?, ?> claims = claims(token);
+        return claims != null && "ADMIN".equals(claims.get("role"));
+    }
+
+    public String subject(String token) {
+        Map<?, ?> claims = claims(token);
+        return claims == null ? null : String.valueOf(claims.get("sub"));
+    }
+
+    private Map<?, ?> claims(String token) {
         try {
             String[] parts = token.split("\\.");
-            if (parts.length != 3) return false;
+            if (parts.length != 3) return null;
             byte[] actual = DECODER.decode(parts[2]);
             byte[] expected = sign(parts[0] + "." + parts[1]);
-            if (!java.security.MessageDigest.isEqual(actual, expected)) return false;
+            if (!java.security.MessageDigest.isEqual(actual, expected)) return null;
             Map<?, ?> claims = json.readValue(DECODER.decode(parts[1]), Map.class);
             Object expiry = claims.get("exp");
-            return expiry instanceof Number n && n.longValue() > Instant.now().getEpochSecond();
+            return expiry instanceof Number n && n.longValue() > Instant.now().getEpochSecond() ? claims : null;
         } catch (Exception e) {
-            return false;
+            return null;
         }
     }
 

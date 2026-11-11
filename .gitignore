@@ -1,12 +1,56 @@
-__pycache__/
-.DS_Store
+# --- Local secrets (never commit) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+secrets/
+.secrets/
+credentials*.json
+service-account*.json
+
+# --- AI/agent-generated workspace notes ---
+# These are planning/meta documents, not part of the application.
+agent.md
+project.md
+skills.md
+superpower.md
+
+# --- Logs and generated test output ---
+*.log
+*.sse.txt
+test-output*.txt
+
+# --- Databases ---
 *.sqlite
 *.sqlite3
 *.db
 *.db-shm
 *.db-wal
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# --- Java / Node build output ---
 backend/target/
 frontend/node_modules/
 frontend/dist/
+*.class
+
+# --- Frontend local env ---
 frontend/.env*
-.env
+!frontend/.env.example
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/

@@ -21,10 +21,10 @@ class AuthControllerTest {
     }
 
     @Test void signupCreatesAnAccountAndReturnsSignedToken() throws Exception {
-        when(auth.signUp("A User", "a@example.com", "correct horse battery"))
+        when(auth.signUp("A User", "a@example.com", "a-user", "correct horse battery"))
                 .thenReturn(new AuthService.AuthResponse("jwt-token", new AuthUser("id-1", "A User", "a@example.com", "ADMIN")));
         mvc.perform(post("/auth/signup").contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"name\":\"A User\",\"email\":\"a@example.com\",\"password\":\"correct horse battery\"}"))
+                        .content("{\"name\":\"A User\",\"email\":\"a@example.com\",\"username\":\"a-user\",\"password\":\"correct horse battery\"}"))
                 .andExpect(status().isCreated()).andExpect(jsonPath("$.token").value("jwt-token"))
                 .andExpect(jsonPath("$.user.email").value("a@example.com"));
     }
@@ -45,8 +45,24 @@ class AuthControllerTest {
     }
 
     @Test void signupRejectsNullJsonBodyWithoutReturningServerError() throws Exception {
-        when(auth.signUp(isNull(), isNull(), isNull())).thenThrow(new AuthService.AuthException(400, "Enter a valid name."));
+        when(auth.signUp(isNull(), isNull(), isNull(), isNull())).thenThrow(new AuthService.AuthException(400, "Enter a valid name."));
         mvc.perform(post("/auth/signup").contentType(MediaType.APPLICATION_JSON).content("null"))
                 .andExpect(status().isBadRequest());
+    }
+
+    @Test void signupIsClosedAfterTheFirstAdministrator() throws Exception {
+        when(auth.hasAdmins()).thenReturn(true);
+        mvc.perform(post("/auth/signup").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"A User\",\"email\":\"a@example.com\",\"username\":\"a-user\",\"password\":\"correct horse battery\"}"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error.message").exists());
+        verify(auth, never()).signUp(any(), any(), any(), any());
+    }
+
+    @Test void bootstrapReportsWhetherPublicSignupIsOpen() throws Exception {
+        when(auth.hasAdmins()).thenReturn(true);
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/auth/bootstrap"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.signup_open").value(false));
     }
 }

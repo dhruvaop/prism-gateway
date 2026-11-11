@@ -1,0 +1,12 @@
+.chat-auth-alt{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:-2px;font-size:10px}
+.chat-auth-link{border:0;background:none;color:#a99cff;font:500 10px 'DM Sans',sans-serif;padding:0;cursor:pointer;text-decoration:none}
+.chat-auth-link:hover{color:#c8c0ff;text-decoration:underline}
+.chat-auth-link.muted{color:#7e8ba0}
+.chat-notice{padding:9px 11px;background:#15251f;border:1px solid #2f6b53;color:#a9e7c8;border-radius:6px;font-size:11px;line-height:1.45}
+.chat-dev-link{display:grid;gap:8px;padding:11px;border:1px dashed #6a5a2f;background:#251f12;border-radius:7px;font-size:10px;color:#e8d59a;line-height:1.45}
+.chat-dev-link code{display:block;font:9px 'DM Mono',monospace;color:#f3e6b8;overflow-wrap:anywhere;word-break:break-all}
+.chat-dev-link button{justify-self:start;border:1px solid #7d6a37;background:#3a3018;color:#f0dda3;border-radius:5px;padding:6px 9px;font:500 9px 'DM Sans',sans-serif;cursor:pointer}
+.chat-dev-link button:hover{background:#4a3d1e}
+.chat-login-card .chat-secondary{height:36px;border:1px solid #364052;background:transparent;color:#c2cbdb;border-radius:6px;display:flex;justify-content:center;align-items:center;gap:7px;font:500 10px 'DM Sans',sans-serif;cursor:pointer}
+.chat-login-card .chat-secondary:hover{border-color:#8174ec;background:#191f2c}
+.chat-login-card .chat-password-hint{display:block;color:#77859a;font-size:9px;line-height:1.45;margin-top:-6px}

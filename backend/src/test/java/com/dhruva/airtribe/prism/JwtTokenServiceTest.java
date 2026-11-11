@@ -12,7 +12,10 @@ class JwtTokenServiceTest {
         JwtTokenService service = new JwtTokenService(SECRET, 3600, new ObjectMapper());
         String token = service.issue(new AuthUser("user-1", "A User", "a@example.com", "ADMIN"));
         assertTrue(service.isValid(token));
-        assertFalse(service.isValid(token.substring(0, token.length() - 1) + (token.endsWith("a") ? "b" : "a")));
+        int tamperAt = token.length() - 5;
+        char replacement = token.charAt(tamperAt) == 'A' ? 'B' : 'A';
+        String tampered = token.substring(0, tamperAt) + replacement + token.substring(tamperAt + 1);
+        assertFalse(service.isValid(tampered));
         assertFalse(service.isValid("not-a-jwt"));
     }
 

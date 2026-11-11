@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class ProviderFailoverTest {
     @Autowired PrismService prism;
     HttpServer server;
-    @AfterEach void stop(){if(server!=null)server.stop(0);}
+    @AfterEach void stop(){if(server!=null)server.stop(0);ProviderHealthMonitor health=(ProviderHealthMonitor)ReflectionTestUtils.getField(prism,"providerHealth");if(health!=null)health.reset();}
 
     @Test void retriesPrimaryWithBackoffThenFailsOverToConfiguredProvider() throws Exception {
         AtomicInteger calls=new AtomicInteger();

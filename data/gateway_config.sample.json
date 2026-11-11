@@ -15,8 +15,9 @@
   "retry": { "max_attempts": 3, "initial_backoff_ms": 200, "backoff_multiplier": 2 },
   "degradation": {
     "_comment": "Suggested thresholds for treating a provider as degraded and skipping to fallback.",
+    "_latency_comment": "Hosted LLM calls routinely exceed 5s; 45s catches a stalled provider without demoting a slow-but-working free model.",
     "error_rate_threshold": 0.5,
     "window_seconds": 60,
-    "p95_latency_ms": 5000
+    "p95_latency_ms": 45000
   }
 }

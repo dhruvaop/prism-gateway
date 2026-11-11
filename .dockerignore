@@ -1,0 +1,12 @@
+.git
+.gitignore
+**/node_modules
+**/target
+frontend
+docs
+*.log
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*

@@ -23,7 +23,7 @@ class StreamingGatewayTest {
                 "data: {\"id\":\"mock\",\"choices\":[{\"delta\":{\"content\":\"token-2\"},\"index\":0}]}\n\n",
                 "data: {\"id\":\"mock\",\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2,\"total_tokens\":11}}\n\n",
                 "data: [DONE]\n\n"};for(String c:chunks){out.write(c.getBytes(StandardCharsets.UTF_8));out.flush();try{Thread.sleep(20);}catch(InterruptedException e){Thread.currentThread().interrupt();break;}}out.close();});server.start();
-        providers.put("alpha",new PrismService.Provider("alpha","http://127.0.0.1:"+server.getAddress().getPort()+"/v1","mock-alpha"));
+        providers.put("alpha",new PrismService.Provider("alpha","http://127.0.0.1:"+server.getAddress().getPort()+"/v1","mock-alpha"));ProviderHealthMonitor health=(ProviderHealthMonitor)ReflectionTestUtils.getField(prism,"providerHealth");if(health!=null)health.reset();
     }
     @AfterEach void restore(){if(server!=null)server.stop(0);if(original!=null){providers.clear();providers.putAll(original);}}
     @Test void streamingForwardsEventsAndRecordsProviderUsageAndCost() throws Exception {

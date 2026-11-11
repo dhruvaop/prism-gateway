@@ -23,10 +23,15 @@ def main():
         return 2
 
     print(f"Routing evaluation: {result['correct']}/{result['total']} correct ({result['accuracy']:.1%})")
+    baseline = result.get("baseline") or {}
+    if baseline:
+        print(f"Length-only baseline: {baseline['correct']}/{result['total']} ({baseline['accuracy']:.1%}) at {baseline['threshold_chars']} chars")
+        print(f"Task router beats length-only baseline: {'YES' if result.get('beats_baseline') else 'NO'}")
     for case in result["cases"]:
         status = "PASS" if case["correct"] else "FAIL"
-        print(f"  {status} {case['id']}: expected={case['expected']} actual={case['actual']} — {case['note']}")
-    return 0 if result["accuracy"] >= 0.9 else 1
+        task = f" task={case['task']}" if case.get("task") else ""
+        print(f"  {status} {case['id']}: expected={case['expected']} actual={case['actual']}{task} — {case['note']}")
+    return 0 if result["accuracy"] >= 0.9 and result.get("beats_baseline", True) else 1
 
 
 if __name__ == "__main__":

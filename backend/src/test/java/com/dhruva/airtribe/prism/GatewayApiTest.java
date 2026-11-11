@@ -22,6 +22,11 @@ class GatewayApiTest {
     @Autowired PrismService prism;
     @Autowired JdbcTemplate db;
     @Autowired ObjectMapper json;
+    @Autowired JwtTokenService tokens;
+
+    private String adminToken() {
+        return tokens.issue(new AuthUser("test-bootstrap-admin", "Bootstrap Admin", "bootstrap@example.test", "ADMIN"));
+    }
 
     private MvcResult chat(String key,String body)throws Exception{
         MockHttpServletRequestBuilder request=post("/v1/chat/completions").contentType(MediaType.APPLICATION_JSON).content(body);
@@ -52,15 +57,17 @@ class GatewayApiTest {
     }
     @Test void overviewAndEvalApisAreAvailable() throws Exception {
         String email="admin-"+java.util.UUID.randomUUID()+"@example.com";
-        MvcResult signup=mvc.perform(post("/auth/signup").contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(java.util.Map.of("name","Test Admin","email",email,"password","correct horse battery")))).andExpect(status().isCreated()).andReturn();
+        String username="admin-"+java.util.UUID.randomUUID().toString().substring(0,8);
+        MvcResult signup=mvc.perform(post("/auth/signup").header("Authorization","Bearer "+adminToken()).contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(java.util.Map.of("name","Test Admin","email",email,"username",username,"password","correct horse battery")))).andExpect(status().isCreated()).andReturn();
         String token=json.readTree(signup.getResponse().getContentAsByteArray()).path("token").asText();
         mvc.perform(get("/admin/overview").header("Authorization","Bearer "+token)).andExpect(status().isOk()).andExpect(jsonPath("$.active_keys").value(4));
         mvc.perform(get("/admin/router/eval").header("Authorization","Bearer "+token)).andExpect(status().isOk()).andExpect(jsonPath("$.total").value(20)).andExpect(jsonPath("$.accuracy").value(org.hamcrest.Matchers.greaterThanOrEqualTo(0.9)));
     }
     @Test void signupAndSigninPersistAccountAndProtectAdminApis() throws Exception {
         String email="signin-"+java.util.UUID.randomUUID()+"@example.com";
-        String signupBody=json.writeValueAsString(java.util.Map.of("name","API User","email",email,"password","correct horse battery"));
-        mvc.perform(post("/auth/signup").contentType(MediaType.APPLICATION_JSON).content(signupBody)).andExpect(status().isCreated());
+        String username="signin-"+java.util.UUID.randomUUID().toString().substring(0,8);
+        String signupBody=json.writeValueAsString(java.util.Map.of("name","API User","email",email,"username",username,"password","correct horse battery"));
+        mvc.perform(post("/auth/signup").header("Authorization","Bearer "+adminToken()).contentType(MediaType.APPLICATION_JSON).content(signupBody)).andExpect(status().isCreated());
         MvcResult login=mvc.perform(post("/auth/signin").contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(java.util.Map.of("email",email,"password","correct horse battery")))).andExpect(status().isOk()).andExpect(jsonPath("$.token").isNotEmpty()).andReturn();
         String token=json.readTree(login.getResponse().getContentAsByteArray()).path("token").asText();
         mvc.perform(get("/admin/overview")).andExpect(status().isUnauthorized());

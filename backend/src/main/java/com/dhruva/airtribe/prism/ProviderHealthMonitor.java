@@ -10,7 +10,7 @@ public final class ProviderHealthMonitor {
     private final Map<String, ArrayDeque<Sample>> samples = new HashMap<>();
     private long windowMillis = 60_000;
     private double errorRateThreshold = 0.5;
-    private long p95LatencyThresholdMs = 5_000;
+    private long p95LatencyThresholdMs = 45_000;
     private int minimumSamples = 3;
 
     public ProviderHealthMonitor() { this(Clock.systemUTC()); }
@@ -22,6 +22,8 @@ public final class ProviderHealthMonitor {
         p95LatencyThresholdMs = Math.max(1, p95ThresholdMs);
         pruneAll();
     }
+
+    public synchronized void reset() { samples.clear(); }
 
     public synchronized void record(String provider, boolean success, long latencyMs) {
         if (provider == null || provider.isBlank()) return;
@@ -44,6 +46,24 @@ public final class ProviderHealthMonitor {
         }
         healthy.addAll(degraded);
         return healthy.toArray(String[]::new);
+    }
+
+    /** Orders candidates inside their healthy/degraded groups by recent latency. */
+    public synchronized String[] preferLowestLatency(String[] chain, Function<String, String> providerForModel, boolean weighted) {
+        List<String> ordered = new ArrayList<>(Arrays.asList(chain));
+        Map<String,Integer> originalOrder = new HashMap<>();
+        for (int i=0;i<chain.length;i++) originalOrder.put(chain[i],i);
+        ordered.sort(Comparator.<String>comparingInt(model -> {
+            String provider=providerForModel.apply(model);
+            return provider!=null&&isDegraded(provider)?1:0;
+        }).thenComparingDouble(model -> {
+            String provider=providerForModel.apply(model);
+            Health h=health(provider==null?"":provider);
+            if(h.total==0||h.averageLatencyMs==null)return Double.MAX_VALUE;
+            double weight=weighted&&"beta".equalsIgnoreCase(provider)?1.15:1.0;
+            return h.averageLatencyMs/weight;
+        }).thenComparingInt(originalOrder::get));
+        return ordered.toArray(String[]::new);
     }
 
     public synchronized List<Map<String, Object>> snapshot(Collection<String> providerNames) {

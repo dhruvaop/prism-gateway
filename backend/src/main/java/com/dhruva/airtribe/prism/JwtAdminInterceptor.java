@@ -16,7 +16,7 @@ public class JwtAdminInterceptor implements HandlerInterceptor {
     @Override public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws IOException {
         if (CorsUtils.isPreFlightRequest(request)) return true;
         String header = request.getHeader("Authorization");
-        if (header != null && header.startsWith("Bearer ") && auth.isValidToken(header.substring(7).trim())) return true;
+        if (header != null && header.startsWith("Bearer ") && auth.isAdminToken(header.substring(7).trim())) return true;
         response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
         response.setContentType("application/json");
         response.getWriter().write("{\"error\":{\"message\":\"A valid sign-in token is required.\"}}");

@@ -21,6 +21,7 @@ class ProviderHealthMonitorTest {
 
     @Test void degradesAProviderForHighP95LatencyAndReportsMetrics() {
         ProviderHealthMonitor health = new ProviderHealthMonitor();
+        health.configure(60, 0.5, 5_000);
         health.record("alpha", true, 5_000);
         health.record("alpha", true, 5_100);
         health.record("alpha", true, 5_200);

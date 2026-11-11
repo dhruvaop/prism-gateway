@@ -1,0 +1,56 @@
+# Render Blueprint for a free Prism deployment.
+# Backend: Docker web service built from the repository root Dockerfile.
+# Frontend: static Vite build (admin console at /, chat at /chat.html).
+# Database: use the existing Supabase project; do not use Render's free
+# Postgres because Render deletes free databases after 30 days.
+services:
+  - type: web
+    name: prism-gateway
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: SPRING_PROFILES_ACTIVE
+        value: enterprise
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_USERNAME
+        sync: false
+      - key: DATABASE_PASSWORD
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JAVA_TOOL_OPTIONS
+        value: "-Xms96m -Xmx300m -XX:MaxMetaspaceSize=128m"
+      - key: DATABASE_POOL_MAX
+        value: "5"
+      - key: PRISM_CACHE_MEMORY_MAX_ENTRIES
+        value: "300"
+      - key: PRISM_CORS_ORIGINS
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: OPENROUTER_PREFER_AS_PRIMARY
+        value: "false"
+      - key: RAZORPAY_PAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_PAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_MERCHANT_ID
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false
+
+  - type: web
+    name: prism-console
+    runtime: static
+    plan: free
+    buildCommand: cd frontend && npm ci && npm run build
+    staticPublishPath: ./frontend/dist
+    envVars:
+      - key: VITE_API_URL
+        sync: false

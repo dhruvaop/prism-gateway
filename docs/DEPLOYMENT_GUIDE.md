@@ -25,12 +25,15 @@ docker compose up --build
 The first build downloads Java, Node, Python, and PostgreSQL images and the app libraries. It may take a few minutes. Compose waits for PostgreSQL, applies the database migration, and then starts the gateway. When the services finish starting, open:
 
 - Operations console: http://localhost:8081
+- User chat: http://localhost:8081/chat.html
 - Gateway health check: http://localhost:8081/health
 - OpenAI-compatible API: http://localhost:8081/v1/chat/completions
 
 The deployment database is PostgreSQL 17. Its internal Docker endpoint is `db:5432`, database name `prism`; the gateway connects with `jdbc:postgresql://db:5432/prism`. Flyway applies SQL migrations from `backend/src/main/resources/db/migration/postgresql/` at startup. Those migrations create request logs, monthly usage, cache entries, and persistent seeded virtual keys. Keep PostgreSQL private; application callers use the HTTP gateway endpoint on port 8081, not the database port.
 
 The first page load asks you to **Sign up** or **Sign in**. Sign-up saves your account in `auth_users`, stores only a BCrypt password hash, and returns a signed JWT. The browser keeps that token for the current session and sends it to `/admin/**` endpoints; tokens expire after 24 hours. The OpenAI-compatible `/v1/chat/completions` endpoint continues to use virtual keys. Set a unique random `JWT_SECRET` (at least 32 characters) in the root `.env` before deployment; keep it private and stable across gateway restarts. `JWT_TTL_SECONDS` can change the token lifetime.
+
+Workspace administrators can open **Access** in the operations console to create plans, teams, and users. Each user gets an individual virtual key from their team's plan. Chat users sign in at `/chat.html`; their API key stays on the server. API-only accounts can use the OpenAI-compatible API but cannot sign in to chat.
 
 To use hosted Supabase Postgres instead of the Compose database, open the project and select **Connect → Session pooler**. Use the host, port, database, and username shown there. In the root `.env`, set `DATABASE_URL=jdbc:postgresql://<pooler-host>:5432/postgres?sslmode=require`, `DATABASE_USERNAME` to the displayed pooler username, and `DATABASE_PASSWORD` to the database password created for the project. The project URL and publishable/secret API keys are not database credentials. Compose lets these values override its local PostgreSQL defaults; Flyway creates Prism's schema in the hosted database at gateway startup.
 

@@ -16,13 +16,13 @@ class AuthServiceTest {
         AuthService service = new AuthService(db, jwt);
         when(db.update(anyString(), any(Object[].class))).thenReturn(1);
 
-        var result = service.signUp(" A User ", "A@Example.com", "correct horse battery");
+        var result = service.signUp(" A User ", "A@Example.com", "a-user", "correct horse battery");
 
         assertEquals("a@example.com", result.user().email());
         assertTrue(jwt.isValid(result.token()));
         var values = org.mockito.ArgumentCaptor.forClass(Object[].class);
         verify(db).update(anyString(), values.capture());
-        String storedHash = String.valueOf(values.getValue()[3]);
+        String storedHash = String.valueOf(values.getValue()[4]);
         assertNotEquals("correct horse battery", storedHash);
         assertTrue(new BCryptPasswordEncoder().matches("correct horse battery", storedHash));
     }

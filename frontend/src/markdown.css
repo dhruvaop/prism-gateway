@@ -1,0 +1,152 @@
+.markdown-message {
+  width: 100%;
+  max-width: 100%;
+  white-space: normal;
+  color: inherit;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 12px;
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+}
+
+.markdown-message > :first-child { margin-top: 0; }
+.markdown-message > :last-child { margin-bottom: 0; }
+
+.markdown-message p { margin: 0 0 0.72em; }
+.markdown-message p:last-child { margin-bottom: 0; }
+
+.markdown-message h1,
+.markdown-message h2,
+.markdown-message h3,
+.markdown-message h4,
+.markdown-message h5,
+.markdown-message h6 {
+  margin: 1.05em 0 0.42em;
+  color: #f0f5fc;
+  font-family: Manrope, sans-serif;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: -0.15px;
+}
+
+.markdown-message h1 { font-size: 18px; }
+.markdown-message h2 { font-size: 16px; }
+.markdown-message h3 { font-size: 14px; }
+.markdown-message h4,
+.markdown-message h5,
+.markdown-message h6 { font-size: 12px; }
+
+.markdown-message strong { color: #f0f6ff; font-weight: 700; }
+.markdown-message em { color: #d9e3f0; }
+
+.markdown-message ul,
+.markdown-message ol {
+  margin: 0.35em 0 0.8em;
+  padding-left: 1.4em;
+}
+
+.markdown-message li { margin: 0.22em 0; }
+.markdown-message li > p { margin: 0; }
+.markdown-message li::marker { color: #75d9b3; }
+
+.markdown-message a {
+  color: #79e4bd;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.markdown-message code {
+  padding: 1px 5px;
+  border: 1px solid #28384b;
+  border-radius: 4px;
+  background: #101c2b;
+  color: #a9e7cf;
+  font-family: 'DM Mono', monospace;
+  font-size: 0.88em;
+}
+
+.markdown-message pre {
+  margin: 0.65em 0 0.85em;
+  padding: 10px 12px;
+  overflow-x: auto;
+  border: 1px solid #273447;
+  border-radius: 8px;
+  background: #0b1421;
+  white-space: pre;
+}
+
+.markdown-message pre code {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #dbe8f5;
+  font-size: 10px;
+  line-height: 1.65;
+}
+
+.markdown-message blockquote {
+  margin: 0.65em 0;
+  padding: 2px 0 2px 11px;
+  border-left: 3px solid #3d9d7c;
+  color: #b6c5d7;
+}
+
+.markdown-message hr {
+  margin: 1.1em 0;
+  border: 0;
+  border-top: 1px solid #29364a;
+}
+
+.markdown-message table {
+  width: 100%;
+  margin: 0.65em 0 0.9em;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.markdown-message th,
+.markdown-message td {
+  padding: 5px 8px;
+  border: 1px solid #2a394e;
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown-message th {
+  background: #142132;
+  color: #e2ecf8;
+  font-weight: 600;
+}
+
+.markdown-message tr:nth-child(even) td { background: #0f1926; }
+
+.markdown-message .katex {
+  color: #edf4ff;
+  font-size: 1.08em;
+}
+
+.markdown-message .katex-display {
+  max-width: 100%;
+  margin: 0.7em 0;
+  padding: 3px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.markdown-message .katex-display > .katex { white-space: normal; }
+
+.markdown-message .katex-error {
+  color: #ffb4ba;
+  font-family: 'DM Mono', monospace;
+  font-size: 10px;
+}
+
+.response-body.rendered {
+  padding-right: 10px;
+  white-space: normal;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 12px;
+  line-height: 1.75;
+}
+
+.chat-message.assistant .markdown-message { font-size: 13px; }
