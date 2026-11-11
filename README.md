@@ -16,6 +16,79 @@ For step-by-step deployment instructions in plain language, see docs/DEPLOYMENT_
 
 See docs/ARCHITECTURE_DECISIONS.md for the first-principles database and provider-independence decisions.
 
+## Architecture — Level-1 data flow diagram
+
+Prism has four trust boundaries: the browser, the Spring Boot gateway, the
+PostgreSQL data stores, and external services. The gateway is the only component
+that holds provider credentials. The chat path receives privacy-safe status and
+answer events, while `/v1/chat/completions` remains transparent for API clients.
+
+```mermaid
+flowchart LR
+    subgraph EXT["External entities"]
+        USER["Chat user / API client"]
+        ADMIN["Admin operator"]
+        RAZORPAY["Razorpay"]
+        PROVIDERS["LLM providers<br/>Gemini · OpenRouter · OpenAI<br/>mock Alpha / Beta"]
+    end
+
+    subgraph UI["Presentation layer"]
+        CHAT["Chat app<br/>React · /chat.html"]
+        CONSOLE["Admin console<br/>React · /"]
+    end
+
+    subgraph GW["Gateway processes — Spring Boot"]
+        AUTH("P1<br/>Auth, access<br/>and billing gate")
+        ROUTER("P2<br/>Task router<br/>auto / fast / smart")
+        GUARD("P3<br/>Guardrails<br/>injection / PII")
+        CACHE("P4<br/>Two-layer cache<br/>L1 memory → L2 semantic")
+        ADAPTER("P5<br/>Provider adapters<br/>routing, retry, failover")
+        METER("P6<br/>Usage metering<br/>and audit log")
+        BILLING("P7<br/>Subscriptions<br/>and trial metering")
+        PURGE("P8<br/>Daily cache purge<br/>17:00 IST")
+    end
+
+    subgraph DATA["Data stores"]
+        DB[("D1 · PostgreSQL / Supabase<br/>users · teams · keys · plans<br/>subscriptions · usage")]
+        LOGS[("D2 · Request logs<br/>and cache hits")]
+        SEM[("D3 · Semantic cache")]
+        CONV[("D4 · Conversations")]
+        L1[("D5 · L1 burst cache<br/>in memory")]
+    end
+
+    USER -->|"prompt / follow-up"| CHAT
+    ADMIN -->|"admin actions"| CONSOLE
+    CHAT -->|"REST + SSE<br/>JWT"| AUTH
+    CONSOLE -->|"REST<br/>admin JWT"| AUTH
+
+    AUTH -->|"identity · plan · key"| DB
+    AUTH -->|"conversation read / write"| CONV
+    AUTH -->|"trial / subscription check"| BILLING
+    BILLING -->|"order · subscription state"| DB
+    BILLING <-->|"signed webhook"| RAZORPAY
+
+    AUTH -->|"authorized prompt"| ROUTER
+    ROUTER -->|"task class + tier"| GUARD
+    GUARD -->|"safe prompt"| CACHE
+    CACHE <-->|"get / put"| L1
+    CACHE <-->|"semantic lookup / store"| SEM
+    CACHE -->|"cache hit"| CHAT
+    CACHE -->|"cache miss"| ADAPTER
+    ADAPTER -->|"provider request"| PROVIDERS
+    PROVIDERS -->|"completion / stream"| ADAPTER
+    ADAPTER -->|"answer + SSE"| CHAT
+    ADAPTER -->|"tokens · cost · latency"| METER
+    METER -->|"request record"| LOGS
+    METER -->|"monthly usage"| DB
+
+    PURGE -->|"delete expired entries / hits"| SEM
+    PURGE -->|"clear burst entries"| L1
+    CONSOLE -->|"cache stats / manual purge"| PURGE
+```
+
+**Legend:** rectangle = external entity, rounded rectangle = process,
+cylinder = data store, arrow = data flow.
+
 ## Run locally
 
 Requirements: Java 17+, Maven 3.9+, Node.js 20.19+ (or 22.12+), and Python 3.9+ for the supplied mock servers and verification scripts.
