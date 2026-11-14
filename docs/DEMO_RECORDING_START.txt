@@ -1,0 +1,95 @@
+PRISM DEMO VIDEO - RECORDING START SHEET
+========================================
+
+Full narration and scene timings: docs/DEMO_VIDEO_SCRIPT.md
+This sheet is only for starting the recording cleanly.
+
+1. OPEN FOUR TERMINALS AT THE REPO ROOT
+   cd "E:\Airtribe Project"
+
+2. START THE MOCK PROVIDERS
+   Terminal 1:
+     python scripts/mock_provider.py --port 9001 --name alpha
+   Terminal 2:
+     python scripts/mock_provider.py --port 9002 --name beta
+
+3. START THE GATEWAY
+   Terminal 3:
+     cd backend
+     mvn spring-boot:run
+   Wait for:
+     Tomcat started on port 8080
+
+4. START THE CONSOLE
+   Terminal 4:
+     cd frontend
+     npm run dev
+   Wait for:
+     Local: http://localhost:5173
+
+5. VERIFY BEFORE RECORDING
+   Invoke-RestMethod http://localhost:8080/health
+   Invoke-RestMethod http://localhost:9001/admin/config
+   Invoke-RestMethod http://localhost:9002/admin/config
+
+   Both providers must report: mode ok, fail_rate 0.
+   If not, reset them:
+     Invoke-RestMethod -Method Post -Uri http://localhost:9001/admin/config `
+       -ContentType 'application/json' -Body '{"mode":"ok","fail_rate":0}'
+     Invoke-RestMethod -Method Post -Uri http://localhost:9002/admin/config `
+       -ContentType 'application/json' -Body '{"mode":"ok","fail_rate":0}'
+
+6. WARM UP THE GATEWAY
+   Open http://localhost:5173 and sign in.
+   Playground -> research key -> fast -> send "Say hello".
+   This avoids a cold-start pause on camera.
+
+7. RESET THE DEMO STATE
+   Virtual keys -> research -> routing = mock
+   Semantic cache -> Purge now
+   Playground -> budget-demo -> Reset usage
+   Overview -> Routing health -> alpha and beta both Healthy
+
+8. BROWSER AND DESKTOP PREP
+   - Browser zoom 110%
+   - Hide the bookmarks bar (Ctrl+Shift+B)
+   - Close unrelated tabs and notifications
+   - Keep only http://localhost:5173 open
+   - Do not show .env, full virtual keys, JWTs, passwords, or database URLs
+
+9. RECORDING SETTINGS (OBS)
+   - Window Capture: the browser window for console scenes
+   - 1920x1080, 30 fps
+   - Microphone enabled; record 5 seconds and listen back
+   - Cursor visible
+   - Add a Display Capture scene for terminal cutaways, then switch scenes
+
+10. PRESS RECORD - FIRST 20 SECONDS
+    Show the Overview. Wait 2 seconds. Say:
+
+    "Every AI product runs on an invisible layer between the application
+    and the model providers. It handles keys, budgets, failover, caching,
+    and cost accounting. Prism is that layer. It is an OpenAI-compatible
+    LLM gateway with machine judgment in the request path: it judges how
+    hard each prompt is, routes it to the right model tier, and matches
+    meaning - not just strings - to serve repeated questions from cache.
+    In the next seven minutes, I'll demonstrate the full workflow from the
+    case study."
+
+11. NEXT SHOT
+    Sign-in screen -> sign in as admin -> Overview. Say:
+
+    "This is the Prism operations console. I'll sign in as the workspace
+    administrator. The browser holds a short-lived admin JWT. Provider
+    credentials never leave the gateway, and the console never receives them."
+
+12. IF SOMETHING GOES WRONG
+    - Port already in use: stop the old process and restart that terminal.
+    - First request slow: wait and retry; the gateway is warming up.
+    - Cache does not hit: purge, send prompt A, then paraphrase B, same key.
+    - Budget key rejects request 1: click Reset usage again.
+    - Rate test is not 10 accepted / 20 rejected: wait 60 seconds, rerun.
+    - Failover still shows alpha: confirm mode=down, then retry.
+
+STOP RECORDING AFTER THE CLOSE.
+DO NOT SHOW TERMINAL HISTORY THAT CONTAINS SECRETS.
