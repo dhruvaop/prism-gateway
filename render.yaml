@@ -60,8 +60,10 @@ services:
       # cannot deliver reset links and production hides the dev fallback.
       - key: PRISM_MAIL_HOST
         value: smtp-relay.brevo.com
+      # Render's free tier blocks outbound SMTP on 25, 465 and 587. Brevo also
+      # accepts 2525, which is not blocked, so reset mail can be delivered.
       - key: PRISM_MAIL_PORT
-        value: "587"
+        value: "2525"
       - key: PRISM_MAIL_STARTTLS
         value: "true"
       - key: PRISM_MAIL_SSL

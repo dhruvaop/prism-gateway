@@ -14,8 +14,9 @@ public class GatewayController {
     private final PrismService prism;
     private final ManagedAccessService managed;
     private final BillingService billing;
+    private final EmailService mail;
     private final ObjectMapper json;
-    public GatewayController(PrismService prism,ObjectMapper json,ManagedAccessService managed,BillingService billing){this.prism=prism;this.json=json;this.managed=managed;this.billing=billing;}
+    public GatewayController(PrismService prism,ObjectMapper json,ManagedAccessService managed,BillingService billing,EmailService mail){this.prism=prism;this.json=json;this.managed=managed;this.billing=billing;this.mail=mail;}
 
     @PostMapping("/v1/chat/completions")
     public ResponseEntity<StreamingResponseBody> chat(@RequestHeader(value="Authorization",required=false) String auth,@RequestBody Map<String,Object> body){
@@ -37,7 +38,11 @@ public class GatewayController {
         } finally { if(budgetLease!=null&&!streamOwnsLease)budgetLease.close(); }
     }
 
-    @GetMapping("/health") public Map<String,Object> health(){return Map.of("status","ok","service","prism-gateway");}
+    /** Reports liveness plus whether transactional email has usable SMTP credentials.
+     *  Password reset silently degrades to "delivery: none" without them, so this
+     *  flag makes a missing PRISM_MAIL_* environment visible without leaking any
+     *  secret, host, or credential. */
+    @GetMapping("/health") public Map<String,Object> health(){return Map.of("status","ok","service","prism-gateway","mail_configured",mail.configured());}
     @GetMapping("/admin/usage")
     public Map<String,Object> usage(@RequestParam(required=false) String key){
         Map<String,Object> raw=prism.usage(key);
