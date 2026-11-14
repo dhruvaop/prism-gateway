@@ -16,7 +16,7 @@ import java.util.Properties;
  * back to the development reset link instead of silently pretending to send.
  */
 @Service
-public class MailService {
+public class MailService implements EmailService {
     private static final Logger LOGGER = LoggerFactory.getLogger(MailService.class);
     private final JavaMailSenderImpl sender;
     private final String from;
@@ -61,10 +61,10 @@ public class MailService {
         LOGGER.info("prism_mail_configured host={} port={} starttls={} ssl={}", host, port, starttls, ssl);
     }
 
-    public boolean configured() { return sender != null; }
-    public boolean exposeResetLink() { return exposeResetLink; }
+    @Override public boolean configured() { return sender != null; }
+    @Override public boolean exposeResetLink() { return exposeResetLink; }
 
-    public boolean sendPasswordReset(String to, String name, String link, long ttlMinutes) {
+    @Override public boolean sendPasswordReset(String to, String name, String link, long ttlMinutes) {
         String subject = "Reset your Prism password";
         String greeting = name == null || name.isBlank() ? "there" : name.trim();
         String text = "Hi " + greeting + ",\n\n"

@@ -56,6 +56,29 @@ services:
         sync: false
       - key: PRISM_TRIAL_REQUESTS
         value: "5"
+      # Transactional email for password resets. Without these the gateway
+      # cannot deliver reset links and production hides the dev fallback.
+      - key: PRISM_MAIL_HOST
+        value: smtp-relay.brevo.com
+      - key: PRISM_MAIL_PORT
+        value: "587"
+      - key: PRISM_MAIL_STARTTLS
+        value: "true"
+      - key: PRISM_MAIL_SSL
+        value: "false"
+      - key: PRISM_MAIL_USERNAME
+        sync: false
+      - key: PRISM_MAIL_PASSWORD
+        sync: false
+      - key: PRISM_MAIL_FROM
+        sync: false
+      - key: PRISM_MAIL_FROM_NAME
+        value: Prism Gateway
+      # Reset links must point at the public frontend, never localhost.
+      - key: PRISM_CONSOLE_URL
+        value: https://prism-gateway.dhruvabhattacharya407.workers.dev
+      - key: PRISM_CHAT_URL
+        value: https://prism-gateway.dhruvabhattacharya407.workers.dev
 
   - type: web
     name: prism-console

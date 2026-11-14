@@ -15,9 +15,9 @@ public class ChatAppController {
     private final ManagedAccessService managed;
     private final PrismService prism;
     private final AuthService auth;
-    private final BillingService billing;
+    private final EntitlementService billing;
     private final ObjectMapper json=new ObjectMapper();
-    public ChatAppController(ManagedAccessService managed,PrismService prism,AuthService auth,BillingService billing){this.managed=managed;this.prism=prism;this.auth=auth;this.billing=billing;}
+    public ChatAppController(ManagedAccessService managed,PrismService prism,AuthService auth,EntitlementService billing){this.managed=managed;this.prism=prism;this.auth=auth;this.billing=billing;}
 
     @PostMapping("/app/login") public ResponseEntity<?> login(@RequestBody Map<String,Object> body){try{return ResponseEntity.ok(managed.login(String.valueOf(body.getOrDefault("username","")),String.valueOf(body.getOrDefault("password",""))));}catch(AuthService.AuthException ex){return ResponseEntity.status(ex.status()).body(error(ex.getMessage()));}}
     @PostMapping("/app/signup") public ResponseEntity<?> signup(@RequestBody Map<String,Object> body){try{return ResponseEntity.status(201).body(managed.selfSignup(body));}catch(AuthService.AuthException ex){return ResponseEntity.status(ex.status()).body(error(ex.getMessage()));}catch(IllegalArgumentException ex){return ResponseEntity.badRequest().body(error(ex.getMessage()));}}

@@ -32,7 +32,7 @@ public class PasswordResetService {
     private static final int MAX_PASSWORD = 72;
 
     private final JdbcTemplate db;
-    private final MailService mail;
+    private final EmailService mail;
     private final BCryptPasswordEncoder passwords = new BCryptPasswordEncoder(12);
     private final SecureRandom random = new SecureRandom();
     private final long ttlMinutes;
@@ -40,7 +40,7 @@ public class PasswordResetService {
     private final String chatUrl;
     private final String consoleUrl;
 
-    public PasswordResetService(JdbcTemplate db, MailService mail,
+    public PasswordResetService(JdbcTemplate db, EmailService mail,
                                 @Value("${prism.password-reset.ttl-minutes:30}") long ttlMinutes,
                                 @Value("${prism.password-reset.cooldown-seconds:60}") long cooldownSeconds,
                                 @Value("${prism.app.chat-url:http://localhost:5173}") String chatUrl,

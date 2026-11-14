@@ -4,14 +4,13 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -25,16 +24,26 @@ import java.util.*;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * Trial metering, Razorpay checkout, and subscription activation.
+ * Trial metering, payment order management, and subscription activation.
  *
- * <p>The Razorpay key secret never leaves the server. Only the public key id is
- * returned to the browser so Checkout can open an order that this service created.</p>
+ * <p>Adheres to SOLID principles:
+ * <ul>
+ *   <li><b>Single Responsibility Principle (SRP):</b> Manages user entitlements and subscription lifecycle,
+ *       delegating payment gateway mechanics and cryptographic verification to {@link PaymentGateway}.</li>
+ *   <li><b>Open/Closed Principle (OCP) &amp; Dependency Inversion Principle (DIP):</b> Operates against
+ *       the {@link PaymentGateway} abstraction, enabling alternative payment processors (Stripe, etc.)
+ *       to be supported without altering subscription domain rules.</li>
+ *   <li><b>Interface Segregation Principle (ISP):</b> Implements {@link EntitlementService} (for consumers
+ *       needing quota checks like ChatAppController) and {@link BillingOperations} (for checkout/webhook routes).</li>
+ * </ul>
+ * </p>
  */
 @Service
-public class BillingService {
+public class BillingService implements EntitlementService, BillingOperations {
     private static final Logger LOGGER = LoggerFactory.getLogger(BillingService.class);
 
     private final JdbcTemplate db;
+    private final PaymentGateway paymentGateway;
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
 
@@ -43,46 +52,55 @@ public class BillingService {
     private final int proAmountPaise;
     private final int enterpriseAmountPaise;
     private final String currency;
-    private final String keyId;
-    private final String keySecret;
-    private final String razorpayBaseUrl;
-    private final String merchantId;
-    private final String webhookSecret;
     private final String checkoutName;
     private final String trialWebhookUrl;
     private final String trialWebhookSecret;
     private final String chatUrl;
 
+    @Autowired
     public BillingService(JdbcTemplate db,
+                          PaymentGateway paymentGateway,
                           @Value("${prism.billing.trial-requests:5}") int trialRequests,
                           @Value("${prism.billing.subscription-days:30}") int subscriptionDays,
                           @Value("${prism.billing.pro-amount-paise:49900}") int proAmountPaise,
                           @Value("${prism.billing.enterprise-amount-paise:199900}") int enterpriseAmountPaise,
                           @Value("${prism.billing.currency:INR}") String currency,
-                          @Value("${prism.billing.razorpay-key-id:}") String keyId,
-                          @Value("${prism.billing.razorpay-key-secret:}") String keySecret,
-                          @Value("${prism.billing.razorpay-base-url:https://api.razorpay.com/v1}") String razorpayBaseUrl,
-                          @Value("${prism.billing.razorpay-merchant-id:}") String merchantId,
-                          @Value("${prism.billing.razorpay-webhook-secret:}") String webhookSecret,
                           @Value("${prism.billing.checkout-name:Prism Gateway}") String checkoutName,
                           @Value("${prism.billing.trial-webhook-url:}") String trialWebhookUrl,
                           @Value("${prism.billing.trial-webhook-secret:}") String trialWebhookSecret,
                           @Value("${prism.app.chat-url:http://localhost:5173}") String chatUrl) {
         this.db = db;
+        this.paymentGateway = paymentGateway;
         this.trialRequests = Math.max(0, trialRequests);
         this.subscriptionDays = Math.max(1, subscriptionDays);
         this.proAmountPaise = Math.max(100, proAmountPaise);
         this.enterpriseAmountPaise = Math.max(100, enterpriseAmountPaise);
         this.currency = currency == null || currency.isBlank() ? "INR" : currency.trim().toUpperCase(Locale.ROOT);
-        this.keyId = keyId == null ? "" : keyId.trim();
-        this.keySecret = keySecret == null ? "" : keySecret.trim();
-        this.razorpayBaseUrl = (razorpayBaseUrl == null || razorpayBaseUrl.isBlank() ? "https://api.razorpay.com/v1" : razorpayBaseUrl.trim()).replaceAll("/+$", "");
-        this.merchantId = merchantId == null ? "" : merchantId.trim();
-        this.webhookSecret = webhookSecret == null ? "" : webhookSecret.trim();
         this.checkoutName = checkoutName == null || checkoutName.isBlank() ? "Prism Gateway" : checkoutName.trim();
         this.trialWebhookUrl = trialWebhookUrl == null ? "" : trialWebhookUrl.trim();
         this.trialWebhookSecret = trialWebhookSecret == null ? "" : trialWebhookSecret.trim();
         this.chatUrl = chatUrl == null ? "" : chatUrl.trim().replaceAll("/+$", "");
+    }
+
+    /** Overload for programmatic construction preserving backwards compatibility. */
+    public BillingService(JdbcTemplate db,
+                          int trialRequests,
+                          int subscriptionDays,
+                          int proAmountPaise,
+                          int enterpriseAmountPaise,
+                          String currency,
+                          String keyId,
+                          String keySecret,
+                          String razorpayBaseUrl,
+                          String merchantId,
+                          String webhookSecret,
+                          String checkoutName,
+                          String trialWebhookUrl,
+                          String trialWebhookSecret,
+                          String chatUrl) {
+        this(db, new RazorpayPaymentGateway(keyId, keySecret, razorpayBaseUrl, webhookSecret),
+                trialRequests, subscriptionDays, proAmountPaise, enterpriseAmountPaise, currency,
+                checkoutName, trialWebhookUrl, trialWebhookSecret, chatUrl);
     }
 
     public record Plan(String id, String name, int amountPaise, int days) {}
@@ -99,6 +117,7 @@ public class BillingService {
                 .orElseThrow(() -> new IllegalArgumentException("Choose the pro or enterprise plan."));
     }
 
+    @Override
     public Map<String, Object> status(long userId) {
         Entitlement entitlement = entitlement(userId);
         Map<String, Object> out = new LinkedHashMap<>();
@@ -107,16 +126,17 @@ public class BillingService {
         out.put("subscription", activeSubscription(userId));
         out.put("plans", plans().stream().map(this::publicPlan).toList());
         out.put("currency", currency);
-        out.put("razorpay_key_id", keyId);
-        out.put("enabled", checkoutEnabled());
+        out.put("razorpay_key_id", paymentGateway.keyId());
+        out.put("enabled", paymentGateway.isConfigured());
         return out;
     }
 
+    @Override
     public Entitlement entitlement(long userId) {
         Map<String, Object> subscription = activeSubscription(userId);
         boolean subscribed = subscription != null;
         // Accounts provisioned by an administrator are unlimited. Only public
-        // self-signups go through the five-request demo and the paywall.
+        // self-signups go through the demo quota and paywall.
         if (!selfSignup(userId)) return new Entitlement(true, subscribed, true, 0, 0, 0);
         int used = trialUsed(userId);
         int remaining = Math.max(0, trialRequests - used);
@@ -124,6 +144,7 @@ public class BillingService {
     }
 
     /** Counts the request that was just admitted. Only self-serve trials are metered. */
+    @Override
     public void recordRequest(long userId) {
         reserveRequest(userId);
     }
@@ -133,6 +154,7 @@ public class BillingService {
      * check-and-increment a single database operation, so parallel requests
      * cannot push a self-serve account past its free limit.
      */
+    @Override
     public boolean reserveRequest(long userId) {
         if (!selfSignup(userId)) return true;
         if (activeSubscription(userId) != null) return true;
@@ -143,59 +165,28 @@ public class BillingService {
         return true;
     }
 
+    @Override
     public Map<String, Object> createOrder(long userId, String planId) {
-        if (!checkoutEnabled()) throw new IllegalStateException("Razorpay is not configured on this gateway.");
+        if (!paymentGateway.isConfigured()) throw new IllegalStateException("Razorpay is not configured on this gateway.");
         Plan plan = plan(planId);
         Map<String, Object> user = profile(userId);
-        String receipt = "prism_" + userId + "_" + System.currentTimeMillis();
-        Map<String, Object> request = new LinkedHashMap<>();
-        request.put("amount", plan.amountPaise());
-        request.put("currency", currency);
-        request.put("receipt", receipt);
-        request.put("notes", Map.of("user_id", String.valueOf(userId), "plan", plan.id(), "email", String.valueOf(user.get("email"))));
-        try {
-            HttpRequest order = HttpRequest.newBuilder(URI.create(razorpayBaseUrl + "/orders"))
-                    .timeout(Duration.ofSeconds(15))
-                    .header("Content-Type", "application/json")
-                    .header("Authorization", basicAuth())
-                    .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(request), StandardCharsets.UTF_8))
-                    .build();
-            HttpResponse<String> response = http.send(order, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-            if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                LOGGER.warn("razorpay_order_rejected status={}", response.statusCode());
-                throw new IllegalStateException("Razorpay could not create the payment order. Check the gateway billing configuration.");
-            }
-            Map<String, Object> created = json.readValue(response.body(), new TypeReference<>() {});
-            String orderId = String.valueOf(created.get("id"));
-            String now = Instant.now().toString();
-            db.update("INSERT INTO subscriptions(user_id,plan,status,amount_paise,currency,razorpay_order_id,starts_at,ends_at,created_at) VALUES(?,?,'pending',?,?,?,?,?,?)",
-                    userId, plan.id(), plan.amountPaise(), currency, orderId, now, now, now);
-            LOGGER.info("razorpay_order_created userId={} plan={} amountPaise={} orderId={}", userId, plan.id(), plan.amountPaise(), orderId);
-            Map<String, Object> out = new LinkedHashMap<>();
-            out.put("order_id", orderId);
-            out.put("amount", plan.amountPaise());
-            out.put("currency", currency);
-            out.put("key_id", keyId);
-            out.put("name", checkoutName);
-            out.put("description", plan.name() + " · monthly subscription");
-            out.put("plan", plan.id());
-            out.put("prefill", Map.of("name", String.valueOf(user.get("name")), "email", String.valueOf(user.get("email"))));
-            out.put("notes", Map.of("user_id", String.valueOf(userId), "plan", plan.id()));
-            return out;
-        } catch (IllegalStateException ex) {
-            throw ex;
-        } catch (Exception ex) {
-            LOGGER.warn("razorpay_order_failed userId={} reason={}", userId, ex.getClass().getSimpleName());
-            throw new IllegalStateException("Razorpay could not create the payment order. Try again in a moment.");
-        }
+
+        Map<String, Object> out = paymentGateway.createOrder(userId, plan.id(), plan.amountPaise(), currency, checkoutName, user);
+        String orderId = String.valueOf(out.get("order_id"));
+        String now = Instant.now().toString();
+        db.update("INSERT INTO subscriptions(user_id,plan,status,amount_paise,currency,razorpay_order_id,starts_at,ends_at,created_at) VALUES(?,?,'pending',?,?,?,?,?,?)",
+                userId, plan.id(), plan.amountPaise(), currency, orderId, now, now, now);
+        LOGGER.info("razorpay_order_created userId={} plan={} amountPaise={} orderId={}", userId, plan.id(), plan.amountPaise(), orderId);
+        return out;
     }
 
+    @Override
     public Map<String, Object> verifyPayment(long userId, Map<String, Object> body) {
         String orderId = text(body, "razorpay_order_id");
         String paymentId = text(body, "razorpay_payment_id");
         String signature = text(body, "razorpay_signature");
         if (orderId.isBlank() || paymentId.isBlank() || signature.isBlank()) throw new IllegalArgumentException("The Razorpay payment response is incomplete.");
-        if (keySecret.isBlank()) throw new IllegalStateException("Razorpay is not configured on this gateway.");
+        if (!paymentGateway.isConfigured()) throw new IllegalStateException("Razorpay is not configured on this gateway.");
         Map<String, Object> subscription;
         try {
             subscription = db.queryForMap("SELECT * FROM subscriptions WHERE razorpay_order_id=? AND user_id=?", orderId, userId);
@@ -203,7 +194,7 @@ public class BillingService {
             throw new IllegalArgumentException("This payment order does not belong to your account.");
         }
         if ("active".equals(String.valueOf(subscription.get("status")))) return status(userId);
-        if (!constantTimeEquals(hmacHex(keySecret, orderId + "|" + paymentId), signature)) {
+        if (!paymentGateway.verifyPaymentSignature(orderId, paymentId, signature)) {
             LOGGER.warn("razorpay_signature_rejected userId={} orderId={}", userId, orderId);
             throw new IllegalArgumentException("Payment signature verification failed.");
         }
@@ -212,10 +203,10 @@ public class BillingService {
         return status(userId);
     }
 
-    /** Handles Razorpay's server-to-server webhook, verified with the webhook secret from the dashboard. */
+    /** Handles external webhook notifications verified through {@link PaymentGateway}. */
+    @Override
     public void handleWebhook(String rawBody, String signature, String eventId) {
-        if (webhookSecret.isBlank()) throw new IllegalStateException("The Razorpay webhook secret is not configured.");
-        if (signature == null || signature.isBlank() || !constantTimeEquals(hmacHex(webhookSecret, rawBody), signature.trim())) {
+        if (!paymentGateway.verifyWebhookSignature(rawBody, signature)) {
             throw new IllegalArgumentException("Invalid Razorpay webhook signature.");
         }
         Map<String, Object> event;
@@ -228,7 +219,7 @@ public class BillingService {
         String id = eventId == null || eventId.isBlank() ? sha256(rawBody) : eventId.trim();
         try {
             db.update("INSERT INTO billing_events(event_id,provider,event_type,payload,created_at) VALUES(?,?,?,?,?)",
-                    id, "razorpay", type, rawBody, Instant.now().toString());
+                    id, paymentGateway.providerName(), type, rawBody, Instant.now().toString());
         } catch (DuplicateKeyException duplicate) {
             return;
         } catch (Exception ex) {
@@ -333,14 +324,6 @@ public class BillingService {
         return out;
     }
 
-    private boolean checkoutEnabled() {
-        return !keyId.isBlank() && !keySecret.isBlank();
-    }
-
-    private String basicAuth() {
-        return "Basic " + Base64.getEncoder().encodeToString((keyId + ":" + keySecret).getBytes(StandardCharsets.UTF_8));
-    }
-
     /** Fires once when the last demo request is consumed, if an endpoint is configured. */
     private void emitTrialExhausted(long userId, int used) {
         String claimed = Instant.now().toString();
@@ -397,14 +380,9 @@ public class BillingService {
         return out;
     }
 
-    static String hmacHex(String secret, String value) {
-        try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-            return HexFormat.of().formatHex(mac.doFinal(value.getBytes(StandardCharsets.UTF_8)));
-        } catch (Exception ex) {
-            throw new IllegalStateException("Unable to sign the billing payload.", ex);
-        }
+    /** Exposes HMAC-SHA256 signature utility for test validation and webhook signing. */
+    public static String hmacHex(String secret, String value) {
+        return RazorpayPaymentGateway.hmacHex(secret, value);
     }
 
     private static String sha256(String value) {
@@ -413,11 +391,6 @@ public class BillingService {
         } catch (Exception ex) {
             return UUID.randomUUID().toString();
         }
-    }
-
-    private static boolean constantTimeEquals(String expected, String provided) {
-        if (expected == null || provided == null) return false;
-        return MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8), provided.getBytes(StandardCharsets.UTF_8));
     }
 
     private static String text(Map<String, Object> body, String key) {

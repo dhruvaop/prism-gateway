@@ -8,13 +8,20 @@ import org.springframework.web.bind.annotation.*;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+/**
+ * Controller handling customer billing status, checkout order generation,
+ * payment verification, and inbound payment webhooks.
+ *
+ * <p>Adheres to the <b>Dependency Inversion Principle (DIP)</b> and
+ * <b>Interface Segregation Principle (ISP)</b> by depending on {@link BillingOperations}.</p>
+ */
 @RestController
 public class BillingController {
     private static final Logger LOGGER = LoggerFactory.getLogger(BillingController.class);
-    private final BillingService billing;
+    private final BillingOperations billing;
     private final ManagedAccessService managed;
 
-    public BillingController(BillingService billing, ManagedAccessService managed) {
+    public BillingController(BillingOperations billing, ManagedAccessService managed) {
         this.billing = billing;
         this.managed = managed;
     }

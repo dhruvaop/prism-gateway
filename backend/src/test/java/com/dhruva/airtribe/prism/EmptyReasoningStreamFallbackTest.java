@@ -2,6 +2,7 @@ package com.dhruva.airtribe.prism;
 
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -9,11 +10,13 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -29,6 +32,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 class EmptyReasoningStreamFallbackTest {
     static final String TEST_KEY = "test-empty-reasoning-key";
     static final HttpServer server = startServer();
+    static final HttpServer alphaServer = startAlphaServer();
 
     static HttpServer startServer() {
         try {
@@ -51,6 +55,26 @@ class EmptyReasoningStreamFallbackTest {
         }
     }
 
+    static HttpServer startAlphaServer() {
+        try {
+            HttpServer s = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            s.createContext("/v1/chat/completions", exchange -> {
+                exchange.getRequestBody().readAllBytes();
+                String stream = "data: {\"id\":\"alpha-stream\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"[alpha:alpha-small] here is your answer\"},\"finish_reason\":null}]}\n\n"
+                        + "data: [DONE]\n\n";
+                byte[] out = stream.getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
+                exchange.sendResponseHeaders(200, out.length);
+                exchange.getResponseBody().write(out);
+                exchange.close();
+            });
+            s.start();
+            return s;
+        } catch (Exception ex) {
+            throw new RuntimeException(ex);
+        }
+    }
+
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry r) {
         r.add("openrouter.api-key", () -> TEST_KEY);
@@ -59,9 +83,22 @@ class EmptyReasoningStreamFallbackTest {
     }
 
     @Autowired MockMvc mvc;
+    @Autowired PrismService prism;
+
+    @BeforeEach
+    void setupAlpha() {
+        @SuppressWarnings("unchecked")
+        Map<String, PrismService.Provider> providers = (Map<String, PrismService.Provider>) ReflectionTestUtils.getField(prism, "providers");
+        if (providers != null) {
+            providers.put("alpha", new PrismService.Provider("alpha", "http://127.0.0.1:" + alphaServer.getAddress().getPort() + "/v1", "mock-alpha"));
+        }
+    }
 
     @AfterAll
-    static void stop() { server.stop(0); }
+    static void stop() {
+        server.stop(0);
+        alphaServer.stop(0);
+    }
 
     @Test
     void reasoningOnlyStreamFailsOverToTheNextProvider() throws Exception {
