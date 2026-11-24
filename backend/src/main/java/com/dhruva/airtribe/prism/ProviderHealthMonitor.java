@@ -1,43 +1,62 @@
 package com.dhruva.airtribe.prism;
 
+import jakarta.annotation.PostConstruct;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+
 import java.time.Clock;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
-/** Rolling, in-memory provider health used to prefer healthy routes. */
+/**
+ * Rolling provider health used to prefer healthy routes.
+ *
+ * <p>Configuration (window and thresholds) is process configuration; the
+ * samples themselves live in a shared store so every gateway replica sees the
+ * same view of a failing provider. Unit tests can construct the monitor with
+ * an isolated in-memory store.
+ */
+@Component
 public final class ProviderHealthMonitor {
     private final Clock clock;
-    private final Map<String, ArrayDeque<Sample>> samples = new HashMap<>();
+    private final ProviderHealthStore store;
+    private final AtomicInteger recorded = new AtomicInteger();
+    @Value("${prism.provider-health.reset-on-start:false}") private boolean resetOnStart;
     private long windowMillis = 60_000;
     private double errorRateThreshold = 0.5;
     private long p95LatencyThresholdMs = 45_000;
     private int minimumSamples = 3;
 
-    public ProviderHealthMonitor() { this(Clock.systemUTC()); }
-    ProviderHealthMonitor(Clock clock) { this.clock = clock; }
+    public ProviderHealthMonitor() { this(new InMemoryProviderHealthStore(), Clock.systemUTC()); }
 
-    public synchronized void configure(long windowSeconds, double errorThreshold, long p95ThresholdMs) {
+    @Autowired
+    public ProviderHealthMonitor(JdbcProviderHealthStore store) { this(store, Clock.systemUTC()); }
+
+    ProviderHealthMonitor(ProviderHealthStore store, Clock clock) { this.store = store; this.clock = clock; }
+
+    /** Isolated test databases start clean; production keeps the shared rolling history. */
+    @PostConstruct void initialize() { if (resetOnStart) reset(); }
+
+    public void configure(long windowSeconds, double errorThreshold, long p95ThresholdMs) {
         windowMillis = Math.max(5, windowSeconds) * 1_000;
         errorRateThreshold = Math.max(0, Math.min(1, errorThreshold));
         p95LatencyThresholdMs = Math.max(1, p95ThresholdMs);
-        pruneAll();
     }
 
-    public synchronized void reset() { samples.clear(); }
+    public void reset() { store.reset(); }
 
-    public synchronized void record(String provider, boolean success, long latencyMs) {
+    public void record(String provider, boolean success, long latencyMs) {
         if (provider == null || provider.isBlank()) return;
-        ArrayDeque<Sample> history = samples.computeIfAbsent(provider, ignored -> new ArrayDeque<>());
-        prune(history);
-        history.addLast(new Sample(clock.millis(), success, Math.max(0, latencyMs)));
+        store.record(new Sample(provider, clock.millis(), success, Math.max(0, latencyMs)));
+        if (recorded.incrementAndGet() % 100 == 0) store.prune(clock.millis() - windowMillis);
     }
 
-    public synchronized boolean isDegraded(String provider) {
-        return health(provider).degraded;
-    }
+    public boolean isDegraded(String provider) { return health(provider).degraded; }
 
     /** Moves degraded routes behind healthy ones while preserving order within each group. */
-    public synchronized String[] preferHealthy(String[] chain, Function<String, String> providerForModel) {
+    public String[] preferHealthy(String[] chain, Function<String, String> providerForModel) {
         List<String> healthy = new ArrayList<>();
         List<String> degraded = new ArrayList<>();
         for (String model : chain) {
@@ -49,7 +68,7 @@ public final class ProviderHealthMonitor {
     }
 
     /** Orders candidates inside their healthy/degraded groups by recent latency. */
-    public synchronized String[] preferLowestLatency(String[] chain, Function<String, String> providerForModel, boolean weighted) {
+    public String[] preferLowestLatency(String[] chain, Function<String, String> providerForModel, boolean weighted) {
         List<String> ordered = new ArrayList<>(Arrays.asList(chain));
         Map<String,Integer> originalOrder = new HashMap<>();
         for (int i=0;i<chain.length;i++) originalOrder.put(chain[i],i);
@@ -66,9 +85,9 @@ public final class ProviderHealthMonitor {
         return ordered.toArray(String[]::new);
     }
 
-    public synchronized List<Map<String, Object>> snapshot(Collection<String> providerNames) {
+    public List<Map<String, Object>> snapshot(Collection<String> providerNames) {
         Set<String> names = new TreeSet<>(providerNames);
-        names.addAll(samples.keySet());
+        names.addAll(store.providers());
         List<Map<String, Object>> result = new ArrayList<>();
         for (String name : names) {
             Health h = health(name);
@@ -90,10 +109,9 @@ public final class ProviderHealthMonitor {
     }
 
     private Health health(String provider) {
-        ArrayDeque<Sample> history = samples.computeIfAbsent(provider, ignored -> new ArrayDeque<>());
-        prune(history);
+        List<Sample> history = store.samples(provider, clock.millis() - windowMillis);
         int total = history.size();
-        int errors = (int) history.stream().filter(s -> !s.success).count();
+        int errors = (int) history.stream().filter(s -> !s.success()).count();
         List<Long> latencies = history.stream().map(Sample::latencyMs).sorted().toList();
         double errorRate = total == 0 ? 0 : (double) errors / total;
         Double average = total == 0 ? null : latencies.stream().mapToLong(Long::longValue).average().orElse(0);
@@ -103,13 +121,7 @@ public final class ProviderHealthMonitor {
         return new Health(total, errors, errorRate, average, p95, degraded);
     }
 
-    private void pruneAll() { for (ArrayDeque<Sample> history : samples.values()) prune(history); }
-    private void prune(ArrayDeque<Sample> history) {
-        long cutoff = clock.millis() - windowMillis;
-        while (!history.isEmpty() && history.peekFirst().at < cutoff) history.removeFirst();
-    }
-
-    private record Sample(long at, boolean success, long latencyMs) {}
+    record Sample(String provider, long at, boolean success, long latencyMs) {}
     private record Health(int total, int errors, double errorRate, Double averageLatencyMs,
-                         Long p95LatencyMs, boolean degraded) {}
+                          Long p95LatencyMs, boolean degraded) {}
 }

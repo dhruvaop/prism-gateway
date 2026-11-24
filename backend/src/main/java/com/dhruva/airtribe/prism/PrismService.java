@@ -16,7 +16,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
-import java.io.SequenceInputStream;
 import java.net.URI;
 import java.net.http.*;
 import java.nio.charset.StandardCharsets;
@@ -24,8 +23,6 @@ import java.nio.file.*;
 import java.time.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedDeque;
-import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
@@ -35,24 +32,6 @@ public class PrismService {
     private final JdbcTemplate db;
     private final ObjectMapper json = new ObjectMapper();
     @Value("${prism.data-dir}") private String dataDir;
-    @Value("${openrouter.api-key:}") private String openRouterApiKey;
-    @Value("${openrouter.base-url:https://openrouter.ai/api/v1}") private String openRouterBaseUrl;
-    @Value("${openrouter.prefer-as-primary:false}") private boolean openRouterPreferAsPrimary;
-    @Value("${openrouter.model:nvidia/nemotron-3.5-lightning:free}") private String openRouterModel;
-    @Value("${openrouter.max-tokens:4096}") private int openRouterMaxTokens;
-    @Value("${openrouter.model-simple:}") private String openRouterSimpleModel;
-    @Value("${openrouter.model-search:}") private String openRouterSearchModel;
-    @Value("${openrouter.model-research:}") private String openRouterResearchModel;
-    @Value("${openrouter.model-reasoning:}") private String openRouterReasoningModel;
-    @Value("${openrouter.model-code:}") private String openRouterCodeModel;
-    @Value("${openrouter.search-online:false}") private boolean openRouterSearchOnline;
-    @Value("${gemini.api-key:}") private String geminiApiKey;
-    @Value("${gemini.base-url:https://generativelanguage.googleapis.com/v1beta/openai}") private String geminiBaseUrl;
-    @Value("${gemini.model:gemini-3.1-flash-lite}") private String geminiModel;
-    @Value("${gemini.prefer-as-primary:false}") private boolean geminiPreferAsPrimary;
-    @Value("${openai.api-key:}") private String openAiApiKey;
-    @Value("${openai.base-url:https://api.openai.com/v1}") private String openAiBaseUrl;
-    @Value("${openai.model:gpt-4o-mini}") private String openAiModel;
     private final TaskRouter taskRouter = new TaskRouter();
     @Value("${spring.datasource.url}") private String databaseUrl;
     @Value("${prism.require-postgres:false}") private boolean requirePostgres;
@@ -61,6 +40,8 @@ public class PrismService {
     @Value("${prism.retry.initial-backoff-ms:200}") private int initialBackoffMs;
     @Value("${prism.retry.backoff-multiplier:2}") private int backoffMultiplier;
     @Value("${prism.routing-strategy:failover}") private String routingStrategy;
+    @Value("${prism.stream.failover-buffer-bytes:4194304}") private int streamBufferBytes;
+    @Value("${prism.stream.max-read-ms:120000}") private long streamMaxReadMs;
     @Value("${prism.cache.max-entries:1000}") private int cacheMaxEntries;
     @Value("${prism.cache.max-entries-per-key:200}") private int cacheMaxEntriesPerKey;
     @Value("${prism.cache.max-entry-bytes:32768}") private int cacheMaxEntryBytes;
@@ -72,16 +53,22 @@ public class PrismService {
     private final Map<String, Provider> providers = new HashMap<>();
     private final Map<String, Alias> aliases = new HashMap<>();
     private final Map<String, Price> prices = new HashMap<>();
-    private final ProviderHealthMonitor providerHealth = new ProviderHealthMonitor();
+    private final ProviderHealthMonitor providerHealth;
+    private final ProviderAdapterRegistry adapters;
+    private final AdmissionService admission;
     private final Map<String, String> routeProviders = new HashMap<>();
     private final Map<String, String> upstreamModels = new HashMap<>();
-    private final Map<String, Deque<Long>> requests = new ConcurrentHashMap<>();
-    private final Map<String, Deque<TokenEvent>> tokenUsage = new ConcurrentHashMap<>();
-    private final Map<String, Semaphore> budgetAdmission = new ConcurrentHashMap<>();
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofMillis(2500)).build();
     private final ShortTermCache shortTermCache;
 
-    public PrismService(JdbcTemplate db, ShortTermCache shortTermCache) { this.db = db; this.shortTermCache = shortTermCache; }
+    public PrismService(JdbcTemplate db, ShortTermCache shortTermCache, ProviderHealthMonitor providerHealth,
+                        ProviderAdapterRegistry adapters, AdmissionService admission) {
+        this.db = db;
+        this.shortTermCache = shortTermCache;
+        this.providerHealth = providerHealth;
+        this.adapters = adapters;
+        this.admission = admission;
+    }
 
     @PostConstruct public void initialize() throws Exception {
         DatabaseDialect.Kind database=DatabaseDialect.detect(databaseUrl);
@@ -149,64 +136,55 @@ public class PrismService {
             try{Tenant t=new Tenant(String.valueOf(row.get("virtual_key")),String.valueOf(row.get("team")),((Number)row.get("monthly_budget_usd")).doubleValue(),((Number)row.get("requests_per_minute")).intValue(),((Number)row.get("tokens_per_minute")).intValue(),Arrays.asList(json.readValue(String.valueOf(row.get("model_allowlist")),String[].class)),((Number)row.get("cache_enabled")).intValue()!=0,((Number)row.get("similarity_threshold")).doubleValue(),String.valueOf(row.get("routing_profile")));tenants.put(t.key,t);}catch(Exception ex){throw new IOException("Unable to load a persisted virtual key",ex);}
         }
     }
+    /** Adapters register providers and routes through this narrow interface. */
+    private final ProviderRegistrar registrar = new ProviderRegistrar() {
+        @Override public void provider(String id, String url, String key) {
+            providers.put(id, new Provider(id, url, key));
+        }
+        @Override public void route(String route, String provider, String upstreamModel, double input, double output) {
+            routeProviders.put(route, provider);
+            upstreamModels.put(route, upstreamModel);
+            prices.putIfAbsent(route, new Price(input, output));
+        }
+        @Override public void alias(String name, String primary, List<String> fallbacks) {
+            aliases.put(name, new Alias(primary, fallbacks));
+        }
+        @Override public boolean hasProvider(String id) { return providers.containsKey(id); }
+        @Override public boolean hasRoute(String route) { return routeProviders.containsKey(route); }
+    };
+
     private void loadConfig(Path p) throws IOException {
-        JsonNode root=read(p); for(JsonNode n:root.path("providers")) providers.put(n.path("name").asText(),new Provider(n.path("name").asText(),n.path("base_url").asText(),n.path("api_key").asText()));
-        root.path("model_aliases").fields().forEachRemaining(e->{JsonNode n=e.getValue(); if(n.has("primary")) aliases.put(e.getKey(),new Alias(n.path("primary").asText(),strings(n.path("fallbacks"))));});
+        JsonNode root=read(p);
+        for(JsonNode n:root.path("providers")) registrar.provider(n.path("name").asText(),n.path("base_url").asText(),n.path("api_key").asText());
+        root.path("model_aliases").fields().forEachRemaining(e->{JsonNode n=e.getValue(); if(n.has("primary")) registrar.alias(e.getKey(),n.path("primary").asText(),strings(n.path("fallbacks")));});
         JsonNode retry=root.path("retry");if(retry.isObject()){maxAttempts=retry.path("max_attempts").asInt(maxAttempts);initialBackoffMs=retry.path("initial_backoff_ms").asInt(initialBackoffMs);backoffMultiplier=retry.path("backoff_multiplier").asInt(backoffMultiplier);}
         JsonNode degradation=root.path("degradation");providerHealth.configure(degradation.path("window_seconds").asLong(60),degradation.path("error_rate_threshold").asDouble(.5),degradation.path("p95_latency_ms").asLong(5000));
-        if(openRouterApiKey!=null&&!openRouterApiKey.isBlank()){
-            String model=openRouterModel;providers.put("openrouter",new Provider("openrouter",openRouterBaseUrl,openRouterApiKey));
-            routeProviders.put("openrouter-fast","openrouter");routeProviders.put("openrouter-smart","openrouter");upstreamModels.put("openrouter-fast",model);upstreamModels.put("openrouter-smart",model);
-            registerTaskModel("openrouter-simple",taskModel(openRouterSimpleModel,model,false));
-            registerTaskModel("openrouter-search",taskModel(openRouterSearchModel,model,openRouterSearchOnline));
-            registerTaskModel("openrouter-research",taskModel(openRouterResearchModel,model,false));
-            registerTaskModel("openrouter-reasoning",taskModel(openRouterReasoningModel,model,false));
-            registerTaskModel("openrouter-code",taskModel(openRouterCodeModel,model,false));
-        }
-        if(geminiApiKey!=null&&!geminiApiKey.isBlank()){
-            providers.put("gemini",new Provider("gemini",geminiBaseUrl,geminiApiKey));
-            routeProviders.put("gemini-fast","gemini");routeProviders.put("gemini-smart","gemini");
-            upstreamModels.put("gemini-fast",geminiModel);upstreamModels.put("gemini-smart",geminiModel);
-            prices.putIfAbsent("gemini-fast",new Price(0,0));prices.putIfAbsent("gemini-smart",new Price(0,0));
-            for(TaskRouter.Task task:TaskRouter.Task.values()){
-                String route="gemini-"+taskRouteName(task);
-                routeProviders.put(route,"gemini");upstreamModels.put(route,geminiModel);prices.putIfAbsent(route,new Price(0,0));
-            }
-        }
-        if(openAiApiKey!=null&&!openAiApiKey.isBlank()){
-            providers.put("openai",new Provider("openai",openAiBaseUrl,openAiApiKey));
-            routeProviders.put("openai-fast","openai");routeProviders.put("openai-smart","openai");
-            upstreamModels.put("openai-fast",openAiModel);upstreamModels.put("openai-smart",openAiModel);
-            prices.putIfAbsent("openai-fast",new Price(0,0));prices.putIfAbsent("openai-smart",new Price(0,0));
-            for(TaskRouter.Task task:TaskRouter.Task.values()){
-                String route="openai-"+taskRouteName(task);
-                routeProviders.put(route,"openai");upstreamModels.put(route,openAiModel);prices.putIfAbsent(route,new Price(0,0));
-            }
-        }
-        if(geminiPreferAsPrimary&&providers.containsKey("gemini")){
-            aliases.put("fast",new Alias("gemini-fast",geminiFallbacks("fast")));
-            aliases.put("smart",new Alias("gemini-smart",geminiFallbacks("smart")));
-        }else if(openRouterPreferAsPrimary&&providers.containsKey("openrouter")){
-            aliases.put("fast",new Alias("openrouter-fast",liveFallbacks("fast","gemini-fast")));
-            aliases.put("smart",new Alias("openrouter-smart",liveFallbacks("smart","gemini-smart")));
+        // Every provider owns its own configuration and request semantics. Adding a
+        // provider no longer requires a new branch here or in the stream/retry code.
+        for(ProviderAdapter adapter:adapters.all()) adapter.register(registrar);
+        ProviderAdapter primary=adapters.primary();
+        if(primary!=null){
+            registrar.alias("fast",primary.id()+"-fast",preferenceFallbacks("fast",primary));
+            registrar.alias("smart",primary.id()+"-smart",preferenceFallbacks("smart",primary));
         }else{
-            if(providers.containsKey("openrouter")){appendFallback("fast","openrouter-fast");appendFallback("smart","openrouter-smart");}
-            if(providers.containsKey("gemini")){appendFallback("fast","gemini-fast");appendFallback("smart","gemini-smart");}
+            for(ProviderAdapter adapter:adapters.all())
+                if(adapter.enabled()&&!adapter.id().equals("mock")){
+                    appendFallback("fast",adapter.id()+"-fast");
+                    appendFallback("smart",adapter.id()+"-smart");
+                }
         }
     }
-    private List<String> geminiFallbacks(String tier){
+    private List<String> preferenceFallbacks(String tier,ProviderAdapter primary){
         List<String> out=new ArrayList<>();
-        if(providers.containsKey("openrouter"))out.add(tier.equals("fast")?"openrouter-fast":"openrouter-smart");
-        for(String model:tier.equals("fast")?List.of("alpha-small","beta-small"):List.of("alpha-large","beta-large"))out.add(model);
+        String routeTier=tier.equals("fast")?"fast":"smart";
+        for(ProviderAdapter adapter:adapters.all()){
+            if(!adapter.enabled()||adapter.id().equals(primary.id()))continue;
+            String route=adapter.id()+"-"+routeTier;
+            if(registrar.hasRoute(route))out.add(route);
+        }
+        Collections.addAll(out,mockChain(tier));
         return out;
     }
-    private List<String> liveFallbacks(String tier,String geminiRoute){
-        List<String> out=new ArrayList<>();if(routeProviders.containsKey(geminiRoute))out.add(geminiRoute);
-        for(String model:tier.equals("fast")?List.of("alpha-small","beta-small"):List.of("alpha-large","beta-large"))out.add(model);
-        return out;
-    }
-    private String taskModel(String configured,String fallback,boolean online){String value=configured==null||configured.isBlank()?fallback:configured.trim();return online&&!value.endsWith(":online")?value+":online":value;}
-    private void registerTaskModel(String name,String upstreamModel){routeProviders.put(name,"openrouter");upstreamModels.put(name,upstreamModel);prices.putIfAbsent(name,new Price(0,0));}
     private void appendFallback(String alias,String model){Alias current=aliases.get(alias);if(current==null)return;List<String> fallbacks=new ArrayList<>(current.fallbacks);if(!fallbacks.contains(model))fallbacks.add(model);aliases.put(alias,new Alias(current.primary,fallbacks));}
     private void loadPrices(Path p) throws IOException { read(p).fields().forEachRemaining(e->prices.put(e.getKey(),new Price(e.getValue().path("input_per_1m").asDouble(),e.getValue().path("output_per_1m").asDouble()))); }
     private List<String> strings(JsonNode n) { List<String> a=new ArrayList<>(); n.forEach(x->a.add(x.asText())); return a; }
@@ -223,8 +201,12 @@ public class PrismService {
             this(key,team,budget,rpm,tpm,allowlist,cacheEnabled,threshold,"auto");
         }
     }
-    private record TokenEvent(long at,int tokens) {}
-    public static final class BudgetLease implements AutoCloseable { private final Semaphore semaphore; private final AtomicBoolean closed=new AtomicBoolean(); private BudgetLease(Semaphore semaphore){this.semaphore=semaphore;} @Override public void close(){if(closed.compareAndSet(false,true))semaphore.release();} }
+    public static final class BudgetLease implements AutoCloseable {
+        private final Runnable release;
+        private final AtomicBoolean closed = new AtomicBoolean();
+        BudgetLease(Runnable release) { this.release = release; }
+        @Override public void close() { if (closed.compareAndSet(false, true)) release.run(); }
+    }
     public record Provider(String name,String url,String key) {}
     private record Alias(String primary,List<String> fallbacks) {}
     private record Price(double input,double output) {}
@@ -235,12 +217,12 @@ public class PrismService {
     public synchronized void log(Tenant t,String requested,String status,String provider,String model,int pt,int ct,double cost,String cache,boolean fallback,String reason,int retries,long latency,String id) {
         String now=Instant.now().toString(); db.update("INSERT INTO request_logs(request_id,virtual_key,team,requested_model,resolved_provider,resolved_model,status,prompt_tokens,completion_tokens,cost_usd,cache,fallback,route_reason,retries,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(request_id) DO UPDATE SET virtual_key=excluded.virtual_key,team=excluded.team,requested_model=excluded.requested_model,resolved_provider=excluded.resolved_provider,resolved_model=excluded.resolved_model,status=excluded.status,prompt_tokens=excluded.prompt_tokens,completion_tokens=excluded.completion_tokens,cost_usd=excluded.cost_usd,cache=excluded.cache,fallback=excluded.fallback,route_reason=excluded.route_reason,retries=excluded.retries,latency_ms=excluded.latency_ms,created_at=excluded.created_at",id,t==null?null:t.key,t==null?null:t.team,requested,provider,model,status,pt,ct,cost,cache,fallback?1:0,reason,retries,latency,now);
         if(t!=null && (status.equals("ok")||status.equals("cache_hit"))) db.update("INSERT INTO usage_monthly(virtual_key,month,team,requests,prompt_tokens,completion_tokens,cost_usd,cache_hits) VALUES(?,?,?,1,?,?,?,?) ON CONFLICT(virtual_key,month) DO UPDATE SET team=excluded.team,requests=usage_monthly.requests+1,prompt_tokens=usage_monthly.prompt_tokens+excluded.prompt_tokens,completion_tokens=usage_monthly.completion_tokens+excluded.completion_tokens,cost_usd=usage_monthly.cost_usd+excluded.cost_usd,cache_hits=usage_monthly.cache_hits+excluded.cache_hits",t.key,YearMonth.now(ZoneOffset.UTC).toString(),t.team,pt,ct,cost,status.equals("cache_hit")?1:0);
-        if(t!=null&&t.tpm>0&&(status.equals("ok")||status.equals("cache_hit"))){Deque<TokenEvent> window=tokenUsage.computeIfAbsent(t.key,k->new ConcurrentLinkedDeque<>());synchronized(window){window.addLast(new TokenEvent(System.currentTimeMillis(),pt+ct));}}
+        if(t!=null&&t.tpm>0&&(status.equals("ok")||status.equals("cache_hit"))) admission.recordTokens(t.key,pt+ct);
         LOGGER.info("gateway_request requestId={} team={} model={} status={} provider={} cache={} fallback={} retries={} promptTokens={} completionTokens={} costUsd={} latencyMs={}",id,t==null?"unknown":t.team,requested,status,provider==null?"none":provider,cache,fallback,retries,pt,ct,String.format(Locale.US,"%.9f",cost),latency);
     }
     public Tenant authenticate(String auth) { if(auth==null||!auth.startsWith("Bearer ")) throw new GatewayException(401,"authentication_error","Missing virtual key"); Tenant t=tenants.get(auth.substring(7).trim()); if(t==null) throw new GatewayException(401,"authentication_error","Invalid virtual key");Integer owner=db.queryForObject("SELECT COUNT(*) FROM tenant_keys WHERE virtual_key=? AND user_id IS NOT NULL",Integer.class,t.key);if(owner!=null&&owner>0){String mode=db.queryForObject("SELECT u.access_mode FROM access_users u JOIN tenant_keys k ON k.user_id=u.id WHERE k.virtual_key=?",String.class,t.key);if("chat".equals(mode))throw new GatewayException(403,"permission_error","This virtual key is restricted to the chat app.");}return t; }
     public Tenant authenticateChat(String key){Tenant t=tenants.get(key);if(t==null)throw new GatewayException(401,"authentication_error","Invalid virtual key");return t;}
-    public BudgetLease acquireBudgetLease(Tenant t){Semaphore lock=budgetAdmission.computeIfAbsent(t.key,k->new Semaphore(1,true));try{lock.acquire();return new BudgetLease(lock);}catch(InterruptedException ex){Thread.currentThread().interrupt();throw new GatewayException(503,"request_interrupted","Request interrupted while waiting for budget accounting");}}
+    public BudgetLease acquireBudgetLease(Tenant t){return new BudgetLease(admission.acquire(t.key));}
     public void admit(Tenant t,String model) {
         validateModel(model);
         if(!t.allowlist.contains(model)) throw new GatewayException(403,"model_not_allowed","Model is not allowed for this key");
@@ -248,8 +230,10 @@ public class PrismService {
         if(spent>=t.budget) throw new GatewayException(429,"budget_exceeded",String.format(Locale.US,"Monthly budget of $%.5f exhausted for this key",t.budget));
         Long tokenCap=tenantLongOption(t.key,"token_cap");
         if(tokenCap!=null){Long used=db.queryForObject("SELECT COALESCE((SELECT prompt_tokens+completion_tokens FROM usage_monthly WHERE virtual_key=? AND month=?),0)",Long.class,t.key,YearMonth.now(ZoneOffset.UTC).toString());if(used>=tokenCap)throw new GatewayException(402,"budget_exceeded","Monthly token limit reached for this key");}
-        if(t.tpm>0){Deque<TokenEvent> window=tokenUsage.computeIfAbsent(t.key,k->new ConcurrentLinkedDeque<>());long tick=System.currentTimeMillis();synchronized(window){while(!window.isEmpty()&&tick-window.peekFirst().at()>=60000)window.removeFirst();if(window.stream().mapToInt(TokenEvent::tokens).sum()>=t.tpm)throw new GatewayException(429,"tpm_limit_exceeded","Tokens per minute limit exceeded");}}
-        Deque<Long> q=requests.computeIfAbsent(t.key,k->new ConcurrentLinkedDeque<>()); long now=System.currentTimeMillis(); synchronized(q){ while(!q.isEmpty()&&now-q.peekFirst()>=60000)q.removeFirst(); if(q.size()>=t.rpm)throw new GatewayException(429,"rate_limit_exceeded","Requests per minute limit exceeded"); q.addLast(now); }
+        // Both windows are claimed atomically in the shared database so two
+        // replicas cannot each admit a full quota for the same virtual key.
+        if(t.tpm>0&&admission.tokensUsed(t.key)>=t.tpm)throw new GatewayException(429,"tpm_limit_exceeded","Tokens per minute limit exceeded");
+        if(!admission.claimRequest(t.key,t.rpm))throw new GatewayException(429,"rate_limit_exceeded","Requests per minute limit exceeded");
     }
     private Long tenantLongOption(String key,String column){try{return db.queryForObject("SELECT "+column+" FROM tenant_keys WHERE virtual_key=?",Long.class,key);}catch(Exception ignored){return null;}}
     private String tenantStringOption(String key,String column,String fallback){try{String value=db.queryForObject("SELECT "+column+" FROM tenant_keys WHERE virtual_key=?",String.class,key);return value==null?fallback:value;}catch(Exception ignored){return fallback;}}
@@ -323,17 +307,7 @@ public class PrismService {
     public List<Map<String,Object>> routingProfiles(){
         List<Map<String,Object>> out=new ArrayList<>();
         out.add(Map.of("id","auto","label","Auto · global preference","available",true));
-        for(String provider:List.of("openrouter","gemini","openai")){
-            if(!providers.containsKey(provider))continue;
-            String label=switch(provider){
-                case "openrouter"->"OpenRouter · Nemotron/task routes";
-                case "gemini"->"Google Gemini";
-                case "openai"->"OpenAI";
-                default->provider;
-            };
-            out.add(Map.of("id",provider,"label",label,"available",true));
-        }
-        out.add(Map.of("id","mock","label","Local mock providers","available",true));
+        out.addAll(adapters.profiles(id->id.equals("mock")||providers.containsKey(id)));
         return out;
     }
     /** Admin input validation for a routing profile. */
@@ -360,10 +334,9 @@ public class PrismService {
     /** Historical global routing used when a key's profile is auto. */
     private String[] legacyTaskChain(TaskRouter.Decision decision) {
         String tier=decision.tier();
-        boolean geminiPrimary=geminiPreferAsPrimary&&providers.containsKey("gemini");
-        if(!openRouterPreferAsPrimary&&!geminiPrimary) return chain(tier,null);
-        String prefix=geminiPrimary?"gemini-":"openrouter-";
-        String taskRoute=prefix+taskRouteName(decision.task());
+        ProviderAdapter primary=adapters.primary();
+        if(primary==null) return chain(tier,null);
+        String taskRoute=primary.id()+"-"+taskRouteName(decision.task());
         List<String> out=new ArrayList<>();
         if(routeProviders.containsKey(taskRoute)) out.add(taskRoute);
         Alias alias=aliases.get(tier);
@@ -373,8 +346,8 @@ public class PrismService {
     private String taskRouteName(TaskRouter.Task task){return switch(task){case SIMPLE->"simple";case WEB_SEARCH->"search";case RESEARCH->"research";case REASONING->"reasoning";case CODE->"code";};}
     private List<String> fallbackProviders(String profile){
         List<String> out=new ArrayList<>();
-        for(String provider:List.of("openrouter","gemini","openai"))
-            if(!provider.equals(profile)&&providers.containsKey(provider))out.add(provider);
+        for(ProviderAdapter adapter:adapters.all())
+            if(!adapter.id().equals(profile)&&adapter.enabled()&&providers.containsKey(adapter.id()))out.add(adapter.id());
         return out;
     }
     private void addProviderRoutes(List<String> out,String provider,String tier,TaskRouter.Task task){
@@ -389,20 +362,23 @@ public class PrismService {
     private String[] mockChain(String tier){return tier.equals("fast")?new String[]{"alpha-small","beta-small"}:new String[]{"alpha-large","beta-large"};}
     public Map<String,Object> routingPolicy(){
         Map<String,Object> routes=new LinkedHashMap<>();
-        boolean geminiPrimary=geminiPreferAsPrimary&&providers.containsKey("gemini");
-        String prefix=geminiPrimary?"gemini-":"openrouter-";
+        ProviderAdapter primary=adapters.primary();
+        String prefix=(primary==null?"openrouter":primary.id())+"-";
+        ProviderAdapter searchAdapter=adapters.adapterFor(primary==null?"openrouter":primary.id());
         for(TaskRouter.Task task:TaskRouter.Task.values()){
             String route=prefix+taskRouteName(task);
             String configured=upstreamModels.get(route);
             if(configured==null)configured=upstreamModels.get("openrouter-"+taskRouteName(task));
-            routes.put(task.key(),Map.of("tier",task.tier(),"model",configured==null?"mock "+task.tier()+" tier":configured,"free",configured==null||configured.endsWith(":free"),"web_search",task==TaskRouter.Task.WEB_SEARCH&&openRouterSearchOnline));
+            routes.put(task.key(),Map.of("tier",task.tier(),"model",configured==null?"mock "+task.tier()+" tier":configured,"free",configured==null||configured.endsWith(":free"),"web_search",task==TaskRouter.Task.WEB_SEARCH&&searchAdapter.searchOnline()));
         }
         Map<String,Object> policy=new LinkedHashMap<>();
-        policy.put("provider",geminiPrimary?"gemini":(providers.containsKey("openrouter")&&openRouterPreferAsPrimary?"openrouter":"mock"));
+        policy.put("provider",primary==null?"mock":primary.id());
         policy.put("routes",routes);
         policy.put("profiles",routingProfiles());
-        if(geminiPrimary&&providers.containsKey("openrouter"))policy.put("fallback",Map.of("provider","openrouter","model",openRouterModel,"tier","then local mocks"));
-        else if(providers.containsKey("gemini"))policy.put("fallback",Map.of("provider","gemini","model",geminiModel,"tier","configured free quota"));
+        ProviderAdapter fallback=adapters.all().stream()
+                .filter(a->a.enabled()&&!a.id().equals("mock")&&(primary==null||!a.id().equals(primary.id())))
+                .findFirst().orElse(null);
+        if(fallback!=null)policy.put("fallback",Map.of("provider",fallback.id(),"model",fallback.model(),"tier","then local mocks"));
         return policy;
     }
     private String profileReason(Tenant tenant,String reason){
@@ -458,51 +434,15 @@ public class PrismService {
     private boolean asksModelIdentity(String prompt){return prompt!=null&&MODEL_IDENTITY_QUESTION.matcher(prompt).find();}
     /** Routing facts that Prism knows authoritatively and the model does not. */
     private record ModelFacts(String requested,String route,String upstreamModel,String providerName,String tier,String task,String[] chain) {}
-    /** Maps an upstream model id to the organisation that trained it. */
-    public String modelCreator(String model){
-        String id=model==null?"":model.toLowerCase(Locale.ROOT);
-        if(id.contains("gemini")||id.startsWith("google/"))return "Google";
-        if(id.startsWith("nvidia/")||id.contains("nemotron"))return "NVIDIA";
-        if(id.startsWith("openai/")||id.startsWith("gpt-"))return "OpenAI";
-        if(id.startsWith("anthropic/")||id.contains("claude"))return "Anthropic";
-        if(id.startsWith("meta-llama/")||id.contains("llama"))return "Meta";
-        if(id.startsWith("mistralai/")||id.contains("mistral")||id.contains("mixtral"))return "Mistral AI";
-        if(id.startsWith("deepseek/"))return "DeepSeek";
-        if(id.startsWith("qwen/"))return "Alibaba";
-        if(id.startsWith("x-ai/")||id.contains("grok"))return "xAI";
-        if(id.startsWith("cohere/"))return "Cohere";
-        if(id.startsWith("alpha")||id.startsWith("beta"))return "Prism mock provider";
-        return "unknown (not in Prism's model catalogue)";
+    /** Provider adapters own their model metadata; the catalogue is the fallback. */
+    private ModelIdentity identity(String model){
+        ModelIdentity supplied=adapters.identify(model);
+        if(supplied!=null)return supplied;
+        return new ModelIdentity(ModelCatalog.creator(model),ModelCatalog.family(model),ModelCatalog.variant(model));
     }
-    /** Human-readable model family derived from the upstream model id. */
-    public String modelFamily(String model){
-        String id=model==null?"":model.toLowerCase(Locale.ROOT);
-        if(id.contains("gemini"))return "Gemini";
-        if(id.contains("nemotron"))return "Nemotron";
-        if(id.contains("gpt"))return "GPT";
-        if(id.contains("claude"))return "Claude";
-        if(id.contains("llama"))return "Llama";
-        if(id.contains("mixtral"))return "Mixtral";
-        if(id.contains("mistral"))return "Mistral";
-        if(id.contains("deepseek"))return "DeepSeek";
-        if(id.contains("qwen"))return "Qwen";
-        if(id.contains("grok"))return "Grok";
-        if(id.startsWith("alpha")||id.startsWith("beta"))return "Prism mock";
-        String leaf=id.contains("/")?id.substring(id.lastIndexOf('/')+1):id;
-        int dash=leaf.indexOf('-');
-        return dash>0?leaf.substring(0,dash):leaf;
-    }
-    /** Optional variant label, e.g. gemini-3.1-flash-lite -> Flash Lite. */
-    private String modelVariant(String model){
-        if(model==null||!model.toLowerCase(Locale.ROOT).contains("gemini"))return null;
-        String leaf=model.contains("/")?model.substring(model.lastIndexOf('/')+1):model;
-        String withoutFamily=leaf.toLowerCase(Locale.ROOT).replaceFirst("^gemini[- ]?","");
-        String variant=withoutFamily.replaceFirst("^\\d+(?:\\.\\d+)*[- ]?","").replace('-',' ').trim();
-        if(variant.isBlank())return null;
-        StringBuilder out=new StringBuilder();
-        for(String word:variant.split("\\s+")){if(!word.isBlank()){if(out.length()>0)out.append(' ');out.append(Character.toUpperCase(word.charAt(0))).append(word.substring(1));}}
-        return out.toString();
-    }
+    public String modelCreator(String model){return identity(model).creator();}
+    public String modelFamily(String model){return identity(model).family();}
+    private String modelVariant(String model){return identity(model).variant();}
     /** Resolves the tier Prism used: explicit alias as-is, otherwise the auto-router task's tier. */
     public String tierFor(String requested,String task){
         if(task==null)return requested;
@@ -620,15 +560,21 @@ public class PrismService {
             return "data: "+json.writeValueAsString(redactPayload(event));
         }catch(Exception ex){return "data: "+redactModelDetails(data);}
     }
-    private void prepareOpenRouterRequest(Provider provider,Map<String,Object> outbound) {
-        if(!provider.name.equals("openrouter")) return;
-        outbound.putIfAbsent("max_tokens",openRouterMaxTokens);
-        outbound.put("reasoning",Map.of("effort","minimal","exclude",true));
-        if(Boolean.TRUE.equals(outbound.get("stream"))) outbound.put("stream_options",Map.of("include_usage",true));
+    /** Request shaping and health eligibility belong to the provider adapter. */
+    private void prepareRequest(Provider provider,Map<String,Object> outbound,boolean stream){
+        adapters.adapterFor(provider.name()).prepareRequest(outbound,stream);
     }
-    /** Task-specific OpenRouter models have their own chain and must not degrade the shared provider health. */
-    private boolean isTaskRoute(String model){return model.startsWith("openrouter-")&&!model.equals("openrouter-fast")&&!model.equals("openrouter-smart");}
-    private void recordHealth(Provider provider,String model,boolean success,long latencyMs){if(!isTaskRoute(model))providerHealth.record(provider.name,success,latencyMs);}
+    private void recordHealth(Provider provider,String model,boolean success,long latencyMs){
+        if(adapters.adapterFor(provider.name()).trackHealth(model))providerHealth.record(provider.name,success,latencyMs);
+    }
+    private HttpRequest upstreamRequest(Provider provider,Map<String,Object> outbound)throws IOException{
+        ProviderAdapter adapter=adapters.adapterFor(provider.name());
+        HttpRequest.Builder builder=HttpRequest.newBuilder(URI.create(adapter.endpoint(provider.url)))
+                .timeout(Duration.ofMillis(timeoutMs))
+                .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(outbound)));
+        adapter.headers(provider.key).forEach(builder::header);
+        return builder.build();
+    }
     public Result complete(Tenant t,Map<String,Object> body){return complete(t,body,false);}
     public Result complete(Tenant t,Map<String,Object> body,boolean hideModelDetails) {
         long start=System.nanoTime(); String requested=String.valueOf(body.getOrDefault("model","")), prompt=prompt(body), lastUser=lastUser(body), routingPrompt=lastUser.isBlank()?prompt:lastUser, requestId="req_"+UUID.randomUUID(); String reason=null, task=null; String resolvedRequest=requested; String[] configuredChain;
@@ -644,9 +590,9 @@ public class PrismService {
         int retries=0;
         for(int ix=0;ix<chain.length;ix++){
             String model=chain[ix];Provider provider=providerFor(model); if(provider==null)continue;String upstreamModel=upstreamModels.getOrDefault(model,model);
-            Map<String,Object> outbound=upstreamBody(body);outbound.put("model",upstreamModel);outbound.put("stream",false);if(hideModelDetails)addPrivacyContext(outbound);else addIdentityContext(outbound,prompt,new ModelFacts(requested,model,upstreamModel,provider.name,resolvedRequest,task,configuredChain));prepareOpenRouterRequest(provider,outbound);
+            Map<String,Object> outbound=upstreamBody(body);outbound.put("model",upstreamModel);outbound.put("stream",false);if(hideModelDetails)addPrivacyContext(outbound);else addIdentityContext(outbound,prompt,new ModelFacts(requested,model,upstreamModel,provider.name,resolvedRequest,task,configuredChain));prepareRequest(provider,outbound,false);
             for(int attempt=0;attempt<maxAttempts;attempt++){long callStarted=System.nanoTime();try{
-                HttpRequest req=HttpRequest.newBuilder(URI.create(provider.url.replaceAll("/$","")+"/chat/completions")).timeout(Duration.ofMillis(timeoutMs)).header("Authorization","Bearer "+provider.key).header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(outbound))).build();
+                HttpRequest req=upstreamRequest(provider,outbound);
                 HttpResponse<String> resp=http.send(req,HttpResponse.BodyHandlers.ofString());long callLatency=(System.nanoTime()-callStarted)/1_000_000;
                 if(resp.statusCode()==200){Map<String,Object> payload=json.readValue(resp.body(),Map.class);if(!hasAssistantContent(payload)){recordHealth(provider,model,false,callLatency);LOGGER.warn("upstream_empty_response requestId={} provider={} model={} attempt={}",requestId,provider.name,model,attempt+1);break;}Map<?,?> usage=(Map<?,?>)payload.getOrDefault("usage",Map.of());int pt=num(usage.get("prompt_tokens")),ct=num(usage.get("completion_tokens"));double cost=cost(model,pt,ct);if(hideModelDetails)payload=redactPayload(payload);else payload.put("model",upstreamModel);recordHealth(provider,model,true,callLatency);long ms=(System.nanoTime()-start)/1_000_000;boolean fallback=!model.equals(configuredChain[0]);String resultProvider=hideModelDetails?"prism":provider.name+"/"+upstreamModel,resultModel=hideModelDetails?"prism":upstreamModel;Result result=new Result(payload,resultProvider,resultModel,hideModelDetails?false:fallback,cost,pt,ct,reason,hideModelDetails?null:task,retries,false,ms,requestId);log(t,requested,"ok",provider.name+"/"+upstreamModel,upstreamModel,pt,ct,cost,"miss",fallback,reason,retries,ms,requestId);if(cache)saveCache(t,requested,prompt,payload);return result;}
                 recordHealth(provider,model,false,callLatency);if(!Set.of(408,429,500,502,503,504).contains(resp.statusCode()))break;LOGGER.warn("upstream_retry requestId={} provider={} model={} attempt={} reason=http_{}",requestId,provider.name,model,attempt+1,resp.statusCode());
@@ -668,17 +614,67 @@ public class PrismService {
         if(!hideModelDetails&&tenant.cacheEnabled&&!Boolean.FALSE.equals(body.get("cache"))&&!asksModelIdentity(prompt)){Result hit=findCache(tenant,requested,prompt);if(hit!=null){String cachedModel=String.valueOf(hit.payload.getOrDefault("model",hit.model));return new StreamSession(null,hit.payload,tenant,requested,prompt,cachedModel,hit.model,"cache",false,reason,task,0,id,started,hideModelDetails,lastUser);}}
         int retries=0;
         for(String model:models){
-            Provider provider=providerFor(model);if(provider==null)continue;String upstreamModel=upstreamModels.getOrDefault(model,model);Map<String,Object> outbound=upstreamBody(body);outbound.put("model",upstreamModel);outbound.put("stream",true);if(hideModelDetails)addPrivacyContext(outbound);else addIdentityContext(outbound,prompt,new ModelFacts(requested,model,upstreamModel,provider.name,target,task,configured));prepareOpenRouterRequest(provider,outbound);
-            for(int attempt=0;attempt<maxAttempts;attempt++){long callStarted=System.nanoTime();try{
-                HttpRequest request=HttpRequest.newBuilder(URI.create(provider.url.replaceAll("/$","")+"/chat/completions")).timeout(Duration.ofMillis(timeoutMs)).header("Authorization","Bearer "+provider.key).header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(outbound))).build();
-                HttpResponse<InputStream> response=http.send(request,HttpResponse.BodyHandlers.ofInputStream());long callLatency=(System.nanoTime()-callStarted)/1_000_000;
-                if(response.statusCode()==200){InputStream gated=null;try{gated=contentGate(response.body());}catch(IOException ex){LOGGER.warn("upstream_stream_probe_failed requestId={} provider={} model={} error={}",id,provider.name,model,ex.getClass().getSimpleName());}if(gated!=null){recordHealth(provider,model,true,callLatency);return new StreamSession(gated,null,tenant,requested,prompt,upstreamModel,model,provider.name+"/"+upstreamModel,!model.equals(configured[0]),reason,task,retries,id,started,hideModelDetails,lastUser);}recordHealth(provider,model,false,(System.nanoTime()-callStarted)/1_000_000);try{response.body().close();}catch(Exception ignored){}LOGGER.warn("upstream_empty_stream requestId={} provider={} model={} attempt={}",id,provider.name,model,attempt+1);break;}
-                recordHealth(provider,model,false,callLatency);try{response.body().close();}catch(Exception ignored){}if(!Set.of(408,429,500,502,503,504).contains(response.statusCode()))break;
-            }catch(Exception ex){recordHealth(provider,model,false,(System.nanoTime()-callStarted)/1_000_000);}
+            Provider provider=providerFor(model);if(provider==null)continue;String upstreamModel=upstreamModels.getOrDefault(model,model);Map<String,Object> outbound=upstreamBody(body);outbound.put("model",upstreamModel);outbound.put("stream",true);if(hideModelDetails)addPrivacyContext(outbound);else addIdentityContext(outbound,prompt,new ModelFacts(requested,model,upstreamModel,provider.name,target,task,configured));prepareRequest(provider,outbound,true);
+            for(int attempt=0;attempt<maxAttempts;attempt++){
+                long callStarted=System.nanoTime();
+                try{
+                    HttpRequest request=upstreamRequest(provider,outbound);
+                    HttpResponse<InputStream> response=http.send(request,HttpResponse.BodyHandlers.ofInputStream());
+                    long callLatency=(System.nanoTime()-callStarted)/1_000_000;
+                    try(InputStream upstream=response.body()){
+                        if(response.statusCode()==200){
+                            // Nothing is written to the client until the whole upstream
+                            // stream is validated. A disconnect or a truncated stream can
+                            // therefore be retried or failed over without corrupting SSE.
+                            BufferedUpstream buffered=bufferStream(upstream);
+                            if(buffered!=null){
+                                recordHealth(provider,model,true,callLatency);
+                                return new StreamSession(new ByteArrayInputStream(buffered.bytes()),null,tenant,requested,prompt,upstreamModel,model,provider.name+"/"+upstreamModel,!model.equals(configured[0]),reason,task,retries,id,started,hideModelDetails,lastUser);
+                            }
+                            recordHealth(provider,model,false,callLatency);
+                            LOGGER.warn("upstream_incomplete_stream requestId={} provider={} model={} attempt={}",id,provider.name,model,attempt+1);
+                        } else {
+                            recordHealth(provider,model,false,callLatency);
+                            if(!Set.of(408,429,500,502,503,504).contains(response.statusCode()))break;
+                            LOGGER.warn("upstream_retry requestId={} provider={} model={} attempt={} reason=http_{}",id,provider.name,model,attempt+1,response.statusCode());
+                        }
+                    }
+                }catch(Exception ex){
+                    recordHealth(provider,model,false,(System.nanoTime()-callStarted)/1_000_000);
+                    LOGGER.warn("upstream_stream_retry requestId={} provider={} model={} attempt={} reason={}",id,provider.name,model,attempt+1,ex.getClass().getSimpleName());
+                }
                 if(attempt+1<maxAttempts){retries++;try{Thread.sleep((long)(initialBackoffMs*Math.pow(backoffMultiplier,attempt)));}catch(InterruptedException ex){Thread.currentThread().interrupt();break;}}
             }
         }
         throw new GatewayException(502,"upstream_error","All configured providers failed for streaming request");
+    }
+    /** Fully validated upstream SSE bytes, ready to replay to the client. */
+    private record BufferedUpstream(byte[] bytes) {}
+    /**
+     * Reads an upstream stream to completion within a bounded memory/time budget.
+     * Returns null when the stream is empty, reasoning-only, or ended without the
+     * SSE [DONE] sentinel (a mid-stream provider disconnect). In all of those
+     * cases no bytes have been committed to the client yet, so the caller can
+     * safely retry or fail over to the next provider.
+     */
+    private BufferedUpstream bufferStream(InputStream input) throws IOException {
+        ByteArrayOutputStream buffer=new ByteArrayOutputStream();
+        byte[] chunk=new byte[8192];
+        long deadline=System.currentTimeMillis()+streamMaxReadMs;
+        int read;
+        while((read=input.read(chunk))!=-1){
+            if(System.currentTimeMillis()>deadline)throw new IOException("stream read timed out");
+            if(streamBufferBytes>0&&buffer.size()+read>streamBufferBytes)throw new IOException("stream exceeded buffer cap");
+            buffer.write(chunk,0,read);
+        }
+        byte[] bytes=buffer.toByteArray();
+        boolean complete=false,content=false;
+        for(String raw:new String(bytes,StandardCharsets.UTF_8).split("\\R")){
+            String line=raw.trim();
+            if(line.equals("data: [DONE]"))complete=true;
+            if(streamLineHasContent(line))content=true;
+        }
+        return content&&complete?new BufferedUpstream(bytes):null;
     }
     public void writeStream(StreamSession s,OutputStream out)throws IOException{
         if(s.hideModelDetails){writePrivateStream(s,out);return;}
@@ -810,13 +806,6 @@ public class PrismService {
     private Object nullSafe(){return "";}
     private void writeEvent(OutputStream out,Map<String,Object> event)throws IOException{out.write(("data: "+json.writeValueAsString(event)+"\n\n").getBytes(StandardCharsets.UTF_8));out.flush();}
     private void writeDone(OutputStream out)throws IOException{out.write("data: [DONE]\n\n".getBytes(StandardCharsets.UTF_8));out.flush();}
-    /**
-     * Holds an upstream stream until the model emits real assistant text. Reasoning-only
-     * responses are common on free reasoning models; without this gate the client receives
-     * a successful stream with no visible answer. The prefix is replayed once content appears,
-     * so normal streaming resumes at the first visible token.
-     */
-    private InputStream contentGate(InputStream in)throws IOException{ByteArrayOutputStream prefix=new ByteArrayOutputStream(),line=new ByteArrayOutputStream();int b;while((b=in.read())>=0){prefix.write(b);if(b=='\n'){String text=line.toString(StandardCharsets.UTF_8);line.reset();if(streamLineHasContent(text.trim()))return new SequenceInputStream(new ByteArrayInputStream(prefix.toByteArray()),in);}else if(b!='\r'){line.write(b);}}return null;}
     private boolean streamLineHasContent(String line){if(!line.startsWith("data: "))return false;String data=line.substring(6).trim();if(data.isEmpty()||data.equals("[DONE]"))return false;try{Map<String,Object> event=json.readValue(data,Map.class);Object choices=event.get("choices");if(choices instanceof List<?> list&&!list.isEmpty()&&list.get(0) instanceof Map<?,?> choice){if(choice.get("delta") instanceof Map<?,?> delta&&hasText(delta.get("content")))return true;if(choice.get("message") instanceof Map<?,?> message&&hasText(message.get("content")))return true;if(hasText(choice.get("text")))return true;}}catch(Exception ignored){}return false;}
     private boolean hasAssistantContent(Map<String,Object> payload){Object choices=payload.get("choices");if(!(choices instanceof List<?> list)||list.isEmpty()||!(list.get(0) instanceof Map<?,?> choice))return false;if(choice.get("message") instanceof Map<?,?> message){if(hasText(message.get("content")))return true;if(message.get("tool_calls") instanceof List<?> calls&&!calls.isEmpty())return true;}return hasText(choice.get("text"));}
     private boolean hasText(Object value){if(value instanceof String s)return !s.isBlank();if(value instanceof List<?> parts){for(Object part:parts)if(part instanceof Map<?,?> map&&hasText(map.get("text")))return true;}return false;}
