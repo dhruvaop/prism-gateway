@@ -5,11 +5,12 @@
 FROM maven:3.9.9-eclipse-temurin-17 AS build
 WORKDIR /workspace
 COPY backend/pom.xml ./
+COPY backend/maven-settings.xml ./maven-settings.xml
 COPY backend/src ./src
 # Maven Central occasionally answers 429 during shared-builder builds. Retry a
 # few times before failing so a transient mirror throttle does not abort a deploy.
 RUN for attempt in 1 2 3 4; do \
-      mvn -q -DskipTests package && break; \
+      mvn -s /workspace/maven-settings.xml -q -DskipTests package && break; \
       echo "Maven build attempt $attempt failed; retrying in 15s"; \
       sleep 15; \
     done; \
