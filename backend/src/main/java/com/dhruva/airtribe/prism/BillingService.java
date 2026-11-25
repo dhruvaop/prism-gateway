@@ -39,7 +39,7 @@ import java.util.concurrent.CompletableFuture;
  * </p>
  */
 @Service
-public class BillingService implements EntitlementService, BillingOperations {
+public class BillingService implements EntitlementService, BillingOperations, BillingEntitlementLookup {
     private static final Logger LOGGER = LoggerFactory.getLogger(BillingService.class);
 
     private final JdbcTemplate db;
@@ -205,7 +205,7 @@ public class BillingService implements EntitlementService, BillingOperations {
 
     /** Handles external webhook notifications verified through {@link PaymentGateway}. */
     @Override
-    public void handleWebhook(String rawBody, String signature, String eventId) {
+    public void handleWebhook(String rawBody, String signature) {
         if (!paymentGateway.verifyWebhookSignature(rawBody, signature)) {
             throw new IllegalArgumentException("Invalid Razorpay webhook signature.");
         }
@@ -216,7 +216,8 @@ public class BillingService implements EntitlementService, BillingOperations {
             throw new IllegalArgumentException("Invalid Razorpay webhook payload.");
         }
         String type = text(event, "event");
-        String id = eventId == null || eventId.isBlank() ? sha256(rawBody) : eventId.trim();
+        // The signed raw body is the only trustworthy idempotency identity.
+        String id = sha256(rawBody);
         try {
             db.update("INSERT INTO billing_events(event_id,provider,event_type,payload,created_at) VALUES(?,?,?,?,?)",
                     id, paymentGateway.providerName(), type, rawBody, Instant.now().toString());

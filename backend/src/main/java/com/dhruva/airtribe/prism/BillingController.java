@@ -69,10 +69,10 @@ public class BillingController {
     /** Razorpay calls this endpoint after a payment is captured or an order is paid. */
     @PostMapping("/webhooks/razorpay")
     public ResponseEntity<?> razorpayWebhook(@RequestHeader(value = "X-Razorpay-Signature", required = false) String signature,
-                                             @RequestHeader(value = "X-Razorpay-Event-Id", required = false) String eventId,
+                                             
                                              @RequestBody(required = false) String rawBody) {
         try {
-            billing.handleWebhook(rawBody == null ? "" : rawBody, signature, eventId);
+            billing.handleWebhook(rawBody == null ? "" : rawBody, signature);
             return ResponseEntity.ok(Map.of("received", true));
         } catch (IllegalArgumentException ex) {
             LOGGER.warn("razorpay_webhook_rejected reason={}", ex.getMessage());

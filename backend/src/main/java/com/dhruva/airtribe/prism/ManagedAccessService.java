@@ -18,7 +18,7 @@ import java.time.ZoneOffset;
 import java.util.*;
 
 @Service
-public class ManagedAccessService {
+public class ManagedAccessService implements VirtualKeyLookup {
     private final JdbcTemplate db;
     private final PrismService prism;
     private final AuthService auth;

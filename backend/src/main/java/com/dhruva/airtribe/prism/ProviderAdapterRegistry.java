@@ -11,16 +11,7 @@ import java.util.Map;
 @Component
 public final class ProviderAdapterRegistry {
     private final List<ProviderAdapter> adapters;
-    private final ProviderAdapter fallback = new OpenAiCompatibleAdapter() {
-        @Override public String id() { return "openai-compatible"; }
-        @Override public String label() { return "OpenAI-compatible"; }
-        @Override public int order() { return 100; }
-        @Override public boolean enabled() { return false; }
-        @Override public String apiKey() { return ""; }
-        @Override public String baseUrl() { return ""; }
-        @Override public String model() { return ""; }
-        @Override public boolean preferAsPrimary() { return false; }
-    };
+    private final ProviderAdapter fallback = new GenericOpenAiAdapter();
 
     public ProviderAdapterRegistry(List<ProviderAdapter> adapters) {
         this.adapters = new ArrayList<>(adapters);
@@ -36,6 +27,25 @@ public final class ProviderAdapterRegistry {
             }
         }
         return fallback;
+    }
+
+    /**
+     * Resolves a route such as {@code custom-labs-fast} to its owning adapter.
+     * Longest id wins, so adapters whose ids contain hyphens are no longer
+     * misparsed by taking the text before the first hyphen.
+     */
+    public ProviderAdapter adapterForRoute(String route) {
+        if (route == null || route.isBlank()) return null;
+        ProviderAdapter match = null;
+        int longest = -1;
+        for (ProviderAdapter adapter : adapters) {
+            String prefix = adapter.id() + "-";
+            if (route.startsWith(prefix) && prefix.length() > longest) {
+                match = adapter;
+                longest = prefix.length();
+            }
+        }
+        return match;
     }
 
     /** The configured primary provider, or null when routing stays on mocks. */

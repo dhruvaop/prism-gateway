@@ -17,9 +17,9 @@ import java.util.UUID;
  * a single atomic SQL statement against the shared database, using a fixed
  * 60-second window so a claim is safe regardless of how many processes race.
  *
- * <p>The budget lease is a row lock emulated with an INSERT that only succeeds
- * when no live lease exists for the key. Stale leases are reclaimed after a
- * timeout so a crashed replica cannot block a key forever.
+ * <p>The budget lease is a row lock emulated with a conditional upsert that only
+ * succeeds when no live lease exists for the key. Stale leases are reclaimed
+ * atomically after a timeout so a crashed replica cannot block a key forever.
  */
 @Service
 public final class AdmissionService {
@@ -44,7 +44,11 @@ public final class AdmissionService {
         db.execute("CREATE TABLE IF NOT EXISTS admission_counters(key_ref TEXT NOT NULL, kind TEXT NOT NULL, window_start BIGINT NOT NULL, used BIGINT NOT NULL DEFAULT 0, PRIMARY KEY(key_ref,kind,window_start))");
         db.execute("CREATE TABLE IF NOT EXISTS admission_leases(key_ref TEXT PRIMARY KEY, owner TEXT NOT NULL, expires_at BIGINT NOT NULL)");
         db.execute("CREATE INDEX IF NOT EXISTS admission_counters_window_idx ON admission_counters(kind,window_start)");
-        if (resetOnStart) reset();
+        if (resetOnStart) {
+            if (dialect != DatabaseDialect.Kind.SQLITE)
+                throw new IllegalStateException("prism.admission.reset-on-start=true is only allowed for an isolated SQLite test database; shared PostgreSQL admission state must not be wiped on boot");
+            reset();
+        }
     }
 
     /** Test/maintenance helper: clears all in-flight admission state. */
@@ -102,13 +106,14 @@ public final class AdmissionService {
         long deadline = System.currentTimeMillis() + maxWaitMs;
         while (true) {
             long now = System.currentTimeMillis();
-            db.update("DELETE FROM admission_leases WHERE expires_at<?", now);
-            int inserted;
-            if (dialect == DatabaseDialect.Kind.SQLITE) {
-                inserted = db.update("INSERT OR IGNORE INTO admission_leases(key_ref,owner,expires_at) VALUES(?,?,?)", key, owner, now + leaseTimeoutMs);
-            } else {
-                inserted = db.update("INSERT INTO admission_leases(key_ref,owner,expires_at) VALUES(?,?,?) ON CONFLICT(key_ref) DO NOTHING", key, owner, now + leaseTimeoutMs);
-            }
+            // One conditional upsert: a live lease is never deleted first, so a
+            // concurrent replica cannot slip in during the delete/insert gap.
+            // An expired lease is stolen atomically by the replica that wins.
+            int inserted = db.update(
+                    "INSERT INTO admission_leases(key_ref,owner,expires_at) VALUES(?,?,?) "
+                    + "ON CONFLICT(key_ref) DO UPDATE SET owner=excluded.owner, expires_at=excluded.expires_at "
+                    + "WHERE admission_leases.expires_at < ?",
+                    key, owner, now + leaseTimeoutMs, now);
             if (inserted > 0) {
                 return () -> db.update("DELETE FROM admission_leases WHERE key_ref=? AND owner=?", key, owner);
             }

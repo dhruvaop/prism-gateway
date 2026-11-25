@@ -27,4 +27,9 @@ class JwtTokenServiceTest {
     @Test void requiresStrongSigningSecret() {
         assertThrows(IllegalArgumentException.class, () -> new JwtTokenService("too-short", 3600, new ObjectMapper()));
     }
+
+    @Test void rejectsKnownPlaceholderSecretEvenWhenLongEnough() {
+        assertThrows(IllegalArgumentException.class, () ->
+                new JwtTokenService("local-prism-jwt-secret-change-this-before-deployment-2026", 3600, new ObjectMapper()));
+    }
 }

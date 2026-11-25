@@ -3,7 +3,7 @@ package com.dhruva.airtribe.prism;
 import java.util.*;
 
 /** Isolated store used by unit tests and by embedders without a database. */
-final class InMemoryProviderHealthStore implements ProviderHealthStore {
+public final class InMemoryProviderHealthStore implements ProviderHealthStore {
     private final Map<String, List<ProviderHealthMonitor.Sample>> samples = new HashMap<>();
 
     @Override public synchronized void record(ProviderHealthMonitor.Sample sample) {

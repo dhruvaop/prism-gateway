@@ -1,9 +1,14 @@
 package com.dhruva.airtribe.prism;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -157,5 +162,38 @@ class SolidDesignPrinciplesTest {
         assertNull(delivery.resetLink()); // Link is emailed, not exposed in response
 
         verify(mockEmail).sendPasswordReset(eq("reset@example.com"), eq("Reset User"), anyString(), eq(30L));
+    }
+
+    /** DIP: the gateway controller depends on abstractions, not concrete services. */
+    @Test
+    void gatewayControllerConstructorDependsOnAbstractions() throws Exception {
+        Constructor<?> constructor = GatewayController.class.getDeclaredConstructors()[0];
+        for (Class<?> type : constructor.getParameterTypes()) {
+            if (type == ObjectMapper.class) continue;
+            assertTrue(type.isInterface(), type.getSimpleName() + " should be an abstraction");
+        }
+    }
+
+    /** ISP/LSP: health storage is a public abstraction and Spring injects that abstraction. */
+    @Test
+    void providerHealthStoreIsAPublicAbstractionInjectedByInterface() throws Exception {
+        assertTrue(Modifier.isPublic(ProviderHealthStore.class.getModifiers()));
+        Constructor<?> autowired = null;
+        for (Constructor<?> candidate : ProviderHealthMonitor.class.getDeclaredConstructors()) {
+            if (candidate.isAnnotationPresent(Autowired.class)) autowired = candidate;
+        }
+        assertNotNull(autowired, "one constructor must be explicitly autowired");
+        assertArrayEquals(new Class<?>[]{ProviderHealthStore.class}, autowired.getParameterTypes());
+    }
+
+    /** OCP: the unknown-provider fallback is a named class, not an anonymous special case. */
+    @Test
+    void registryFallbackIsANamedAdapter() throws Exception {
+        Field fallback = ProviderAdapterRegistry.class.getDeclaredField("fallback");
+        fallback.setAccessible(true);
+        Object value = fallback.get(new ProviderAdapterRegistry(java.util.List.of(new MockAdapter())));
+        assertNotNull(value);
+        assertTrue(value.getClass().getSimpleName().endsWith("OpenAiAdapter"));
+        assertFalse(value.getClass().isAnonymousClass());
     }
 }

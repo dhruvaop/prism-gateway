@@ -49,9 +49,15 @@ public class MailService implements EmailService {
         mail.setUsername(username == null ? "" : username.trim());
         mail.setPassword(password == null ? "" : password);
         mail.setDefaultEncoding("UTF-8");
+        boolean credentials = (username != null && !username.isBlank())
+                || (password != null && !password.isBlank());
+        if (credentials && !starttls && !ssl)
+            throw new IllegalStateException("SMTP credentials require PRISM_MAIL_STARTTLS=true or PRISM_MAIL_SSL=true");
         Properties props = new Properties();
-        props.put("mail.smtp.auth", String.valueOf(username != null && !username.isBlank()));
+        props.put("mail.smtp.auth", String.valueOf(credentials));
         props.put("mail.smtp.starttls.enable", String.valueOf(starttls));
+        // Opportunistic STARTTLS is a downgrade risk. Require it when configured.
+        props.put("mail.smtp.starttls.required", String.valueOf(starttls));
         props.put("mail.smtp.ssl.enable", String.valueOf(ssl));
         props.put("mail.smtp.connectiontimeout", "10000");
         props.put("mail.smtp.timeout", "10000");
@@ -103,7 +109,9 @@ public class MailService implements EmailService {
             LOGGER.info("prism_mail_sent subject={} to={}", subject, mask(to));
             return true;
         } catch (Exception ex) {
-            LOGGER.error("prism_mail_failed subject={} to={} error={}", subject, mask(to), ex.getMessage());
+            // Mail exceptions can echo server responses and credentials. Only
+            // the exception class is safe to log.
+            LOGGER.error("prism_mail_failed subject={} to={} error={}", subject, mask(to), ex.getClass().getSimpleName());
             return false;
         }
     }

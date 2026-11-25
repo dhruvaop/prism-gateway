@@ -89,4 +89,16 @@ class GatewayApiTest {
         db.update("INSERT INTO usage_monthly(virtual_key,month,team,requests,prompt_tokens,completion_tokens,cost_usd,cache_hits) VALUES(?,?,?,0,0,0,?,0) ON CONFLICT(virtual_key,month) DO UPDATE SET cost_usd=excluded.cost_usd", "prism-sk-budget-demo-0j1k2l",YearMonth.now(ZoneOffset.UTC).toString(),"budget-demo",0.00001);
         assertError(chat("prism-sk-budget-demo-0j1k2l","{\"model\":\"fast\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}"),429,"budget_exceeded");
     }
+    @Test void zeroPricedRouteCannotBypassAFiniteBudget() throws Exception {
+        String key="prism-sk-budget-demo-0j1k2l";
+        String month=YearMonth.now(ZoneOffset.UTC).toString();
+        db.update("INSERT INTO usage_monthly(virtual_key,month,team,requests,prompt_tokens,completion_tokens,cost_usd,cache_hits) VALUES(?,?,?,1,0,0,0,0) ON CONFLICT(virtual_key,month) DO UPDATE SET requests=1,cost_usd=0", key,month,"budget-demo");
+        try {
+            // The selected free route records $0, but the request still consumes
+            // the finite budget quota unit and must be rejected.
+            assertError(chat(key,"{\"model\":\"fast\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}"),429,"budget_exceeded");
+        } finally {
+            db.update("UPDATE usage_monthly SET requests=0,cost_usd=0 WHERE virtual_key=? AND month=?",key,month);
+        }
+    }
 }

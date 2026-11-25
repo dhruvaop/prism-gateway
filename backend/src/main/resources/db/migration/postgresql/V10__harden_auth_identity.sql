@@ -5,37 +5,36 @@
 -- "admin@x.com" can both exist and a lookup becomes ambiguous.
 --
 -- This migration is deliberately fail-closed: if existing rows would collide it
--- stops and names the offending values instead of deleting an account.
+-- stops with a count instead of deleting an account or printing email addresses
+-- and usernames into migration logs.
 
 DO $$
 DECLARE
-    duplicates TEXT;
+    duplicate_count INTEGER;
 BEGIN
-    SELECT string_agg(format('%s x%s', lowered, total), ', ')
-      INTO duplicates
+    SELECT count(*) INTO duplicate_count
       FROM (
-        SELECT lower(btrim(email)) AS lowered, count(*) AS total
+        SELECT lower(btrim(email)) AS lowered
           FROM auth_users
          GROUP BY 1
         HAVING count(*) > 1
       ) grouped;
 
-    IF duplicates IS NOT NULL THEN
-        RAISE EXCEPTION 'auth_users has case-insensitive email duplicates: %', duplicates;
+    IF duplicate_count > 0 THEN
+        RAISE EXCEPTION 'auth_users has % case-insensitive email duplicate group(s); values are intentionally omitted from logs', duplicate_count;
     END IF;
 
-    SELECT string_agg(format('%s x%s', lowered, total), ', ')
-      INTO duplicates
+    SELECT count(*) INTO duplicate_count
       FROM (
-        SELECT lower(btrim(username)) AS lowered, count(*) AS total
+        SELECT lower(btrim(username)) AS lowered
           FROM auth_users
          WHERE username IS NOT NULL AND btrim(username) <> ''
          GROUP BY 1
         HAVING count(*) > 1
       ) grouped;
 
-    IF duplicates IS NOT NULL THEN
-        RAISE EXCEPTION 'auth_users has case-insensitive username duplicates: %', duplicates;
+    IF duplicate_count > 0 THEN
+        RAISE EXCEPTION 'auth_users has % case-insensitive username duplicate group(s); values are intentionally omitted from logs', duplicate_count;
     END IF;
 END $$;
 

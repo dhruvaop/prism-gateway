@@ -24,6 +24,12 @@ public class JwtTokenService {
                            ObjectMapper json) {
         if (secret == null || secret.getBytes(StandardCharsets.UTF_8).length < 32)
             throw new IllegalArgumentException("JWT_SECRET must contain at least 32 bytes");
+        String normalized = secret.toLowerCase(java.util.Locale.ROOT);
+        if (normalized.contains("change-this") || normalized.contains("change_this")
+                || normalized.contains("replace-with") || normalized.contains("replace_with")
+                || normalized.contains("placeholder") || normalized.contains("example")) {
+            throw new IllegalArgumentException("JWT_SECRET must not be a known placeholder value");
+        }
         this.secret = secret.getBytes(StandardCharsets.UTF_8);
         this.ttlSeconds = ttlSeconds;
         this.json = json;

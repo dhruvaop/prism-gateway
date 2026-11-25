@@ -145,10 +145,14 @@ class BillingTest {
                 + "\"id\":\"pay_webhook_1\",\"order_id\":\"" + order + "\",\"amount\":199900,\"status\":\"captured\"}}}}";
         String signature = BillingService.hmacHex("test-webhook-secret", body);
 
-        billing.handleWebhook(body, signature, "evt_" + UUID.randomUUID());
+        db.update("DELETE FROM billing_events WHERE event_type='payment.captured'");
+        billing.handleWebhook(body, signature);
         assertTrue(billing.entitlement(id).subscribed());
-        billing.handleWebhook(body, signature, "evt_" + UUID.randomUUID());
+        // A different unsigned event-id header must not defeat idempotency.
+        billing.handleWebhook(body, signature);
         assertTrue(billing.entitlement(id).subscribed());
+        assertEquals(1, db.queryForObject(
+                "SELECT COUNT(*) FROM billing_events WHERE event_type='payment.captured'", Integer.class));
     }
 
     private long createUser() {

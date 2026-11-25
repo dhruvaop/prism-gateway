@@ -11,12 +11,12 @@ import java.util.*;
 @RestController
 public class GatewayController {
     private static final Logger LOGGER=LoggerFactory.getLogger(GatewayController.class);
-    private final PrismService prism;
-    private final ManagedAccessService managed;
-    private final BillingService billing;
+    private final PrismGatewayOperations prism;
+    private final VirtualKeyLookup managed;
+    private final BillingEntitlementLookup billing;
     private final EmailService mail;
     private final ObjectMapper json;
-    public GatewayController(PrismService prism,ObjectMapper json,ManagedAccessService managed,BillingService billing,EmailService mail){this.prism=prism;this.json=json;this.managed=managed;this.billing=billing;this.mail=mail;}
+    public GatewayController(PrismGatewayOperations prism,ObjectMapper json,VirtualKeyLookup managed,BillingEntitlementLookup billing,EmailService mail){this.prism=prism;this.json=json;this.managed=managed;this.billing=billing;this.mail=mail;}
 
     @PostMapping("/v1/chat/completions")
     public ResponseEntity<StreamingResponseBody> chat(@RequestHeader(value="Authorization",required=false) String auth,@RequestBody Map<String,Object> body){

@@ -24,6 +24,7 @@ public final class ProviderHealthMonitor {
     private final ProviderHealthStore store;
     private final AtomicInteger recorded = new AtomicInteger();
     @Value("${prism.provider-health.reset-on-start:false}") private boolean resetOnStart;
+    @Value("${spring.datasource.url:jdbc:sqlite:}") private String databaseUrl = "jdbc:sqlite:";
     private long windowMillis = 60_000;
     private double errorRateThreshold = 0.5;
     private long p95LatencyThresholdMs = 45_000;
@@ -32,12 +33,17 @@ public final class ProviderHealthMonitor {
     public ProviderHealthMonitor() { this(new InMemoryProviderHealthStore(), Clock.systemUTC()); }
 
     @Autowired
-    public ProviderHealthMonitor(JdbcProviderHealthStore store) { this(store, Clock.systemUTC()); }
+    public ProviderHealthMonitor(ProviderHealthStore store) { this(store, Clock.systemUTC()); }
 
     ProviderHealthMonitor(ProviderHealthStore store, Clock clock) { this.store = store; this.clock = clock; }
 
     /** Isolated test databases start clean; production keeps the shared rolling history. */
-    @PostConstruct void initialize() { if (resetOnStart) reset(); }
+    @PostConstruct void initialize() {
+        if (!resetOnStart) return;
+        if (DatabaseDialect.detect(databaseUrl) != DatabaseDialect.Kind.SQLITE)
+            throw new IllegalStateException("prism.provider-health.reset-on-start=true is only allowed for an isolated SQLite test database; shared PostgreSQL health samples must not be wiped on boot");
+        reset();
+    }
 
     public void configure(long windowSeconds, double errorThreshold, long p95ThresholdMs) {
         windowMillis = Math.max(5, windowSeconds) * 1_000;
@@ -121,7 +127,7 @@ public final class ProviderHealthMonitor {
         return new Health(total, errors, errorRate, average, p95, degraded);
     }
 
-    record Sample(String provider, long at, boolean success, long latencyMs) {}
+    public record Sample(String provider, long at, boolean success, long latencyMs) {}
     private record Health(int total, int errors, double errorRate, Double averageLatencyMs,
                           Long p95LatencyMs, boolean degraded) {}
 }

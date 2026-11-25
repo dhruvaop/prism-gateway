@@ -64,6 +64,19 @@ class SharedAdmissionStateTest {
         }
     }
 
+    @Test void expiredBudgetLeaseIsStolenWithoutDeleteInsertRace() {
+        String key = "expired-lease-key";
+        Runnable first = replicaA.acquire(key);
+        String originalOwner = db.queryForObject("SELECT owner FROM admission_leases WHERE key_ref=?", String.class, key);
+        db.update("UPDATE admission_leases SET expires_at=? WHERE key_ref=?", System.currentTimeMillis() - 1, key);
+        Runnable stolen = replicaB.acquire(key);
+        String newOwner = db.queryForObject("SELECT owner FROM admission_leases WHERE key_ref=?", String.class, key);
+        assertNotNull(newOwner);
+        assertNotEquals(originalOwner, newOwner, "an expired lease must be reassigned atomically");
+        stolen.run();
+        first.run();
+    }
+
     @Test void healthSamplesAreSharedAcrossMonitorInstances() {
         ProviderHealthStore store = new InMemoryProviderHealthStore();
         ProviderHealthMonitor replicaOne = new ProviderHealthMonitor(store, Clock.systemUTC());

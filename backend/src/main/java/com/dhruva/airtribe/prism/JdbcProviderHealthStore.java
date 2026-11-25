@@ -13,10 +13,10 @@ import java.util.Set;
  * a provider marked degraded by one process is skipped by all of them.
  */
 @Component
-final class JdbcProviderHealthStore implements ProviderHealthStore {
+public final class JdbcProviderHealthStore implements ProviderHealthStore {
     private final JdbcTemplate db;
 
-    JdbcProviderHealthStore(JdbcTemplate db) { this.db = db; }
+    public JdbcProviderHealthStore(JdbcTemplate db) { this.db = db; }
 
     @PostConstruct
     void initialize() {

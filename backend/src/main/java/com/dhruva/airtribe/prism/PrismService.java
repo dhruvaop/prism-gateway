@@ -27,11 +27,17 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
 @Service
-public class PrismService {
+public class PrismService implements PrismGatewayOperations {
     private static final Logger LOGGER=LoggerFactory.getLogger(PrismService.class);
     private final JdbcTemplate db;
     private final ObjectMapper json = new ObjectMapper();
     @Value("${prism.data-dir}") private String dataDir;
+    @Value("${prism.seed-keys.enabled:true}") private boolean seedKeysEnabled;
+    // A zero-priced upstream must not turn a finite budget into an unlimited
+    // quota. Every request consumes this small accounting unit in addition to
+    // its real dollar cost. Set to 0 only when unlimited zero-cost traffic is
+    // explicitly intended.
+    @Value("${prism.quota.zero-cost-request-usd:0.00001}") private double zeroCostRequestQuotaUsd;
     private final TaskRouter taskRouter = new TaskRouter();
     @Value("${spring.datasource.url}") private String databaseUrl;
     @Value("${prism.require-postgres:false}") private boolean requirePostgres;
@@ -93,7 +99,9 @@ public class PrismService {
             initializeManagedSchema();
         }
         Path root = Paths.get(dataDir).toAbsolutePath().normalize();
-        loadTenants(root.resolve("seed_keys.json")); loadConfig(root.resolve("gateway_config.sample.json")); loadPrices(root.resolve("model_pricing.json"));
+        loadTenants(root.resolve("seed_keys.json"), seedKeysEnabled);
+        loadConfig(root.resolve("gateway_config.sample.json"));
+        loadPrices(root.resolve("model_pricing.json"));
         LOGGER.info("prism_initialized tenants={} providers={} aliases={} pricedModels={} database={}",tenants.size(),providers.size(),aliases.size(),prices.size(),database.name().toLowerCase(Locale.ROOT));
     }
     private void initializeManagedSchema() {
@@ -126,12 +134,15 @@ public class PrismService {
     }
     private void addColumn(String sql) { try { db.execute(sql); } catch (Exception ignored) { } }
     private JsonNode read(Path p) throws IOException { return json.readTree(Files.readAllBytes(p)); }
-    private void loadTenants(Path p) throws IOException {
-        for (JsonNode n : read(p).path("tenants")) {
-            JsonNode c=n.path("semantic_cache");
-            db.update("INSERT INTO tenant_keys(virtual_key,team,monthly_budget_usd,requests_per_minute,tokens_per_minute,model_allowlist,cache_enabled,similarity_threshold,enabled,routing_profile) VALUES(?,?,?,?,?,?,?,?,1,?) ON CONFLICT(virtual_key) DO UPDATE SET team=excluded.team,monthly_budget_usd=excluded.monthly_budget_usd,requests_per_minute=excluded.requests_per_minute,tokens_per_minute=excluded.tokens_per_minute,model_allowlist=excluded.model_allowlist,cache_enabled=excluded.cache_enabled,similarity_threshold=excluded.similarity_threshold,enabled=1,routing_profile=excluded.routing_profile",
-                    n.path("virtual_key").asText(),n.path("team").asText(),n.path("monthly_budget_usd").asDouble(),n.path("rate_limit").path("requests_per_minute").asInt(),n.path("rate_limit").path("tokens_per_minute").asInt(0),json.writeValueAsString(strings(n.path("model_allowlist"))),c.path("enabled").asBoolean()?1:0,c.path("similarity_threshold").asDouble(.92),n.path("routing_profile").asText("auto"));
+    private void loadTenants(Path p, boolean seed) throws IOException {
+        if (seed && Files.isRegularFile(p)) {
+            for (JsonNode n : read(p).path("tenants")) {
+                JsonNode c=n.path("semantic_cache");
+                db.update("INSERT INTO tenant_keys(virtual_key,team,monthly_budget_usd,requests_per_minute,tokens_per_minute,model_allowlist,cache_enabled,similarity_threshold,enabled,routing_profile) VALUES(?,?,?,?,?,?,?,?,1,?) ON CONFLICT(virtual_key) DO UPDATE SET team=excluded.team,monthly_budget_usd=excluded.monthly_budget_usd,requests_per_minute=excluded.requests_per_minute,tokens_per_minute=excluded.tokens_per_minute,model_allowlist=excluded.model_allowlist,cache_enabled=excluded.cache_enabled,similarity_threshold=excluded.similarity_threshold,enabled=1,routing_profile=excluded.routing_profile",
+                        n.path("virtual_key").asText(),n.path("team").asText(),n.path("monthly_budget_usd").asDouble(),n.path("rate_limit").path("requests_per_minute").asInt(),n.path("rate_limit").path("tokens_per_minute").asInt(0),json.writeValueAsString(strings(n.path("model_allowlist"))),c.path("enabled").asBoolean()?1:0,c.path("similarity_threshold").asDouble(.92),n.path("routing_profile").asText("auto"));
+            }
         }
+        // Persisted keys are authoritative even when seed loading is disabled.
         for(Map<String,Object> row:db.queryForList("SELECT virtual_key,team,monthly_budget_usd,requests_per_minute,tokens_per_minute,model_allowlist,cache_enabled,similarity_threshold,routing_profile FROM tenant_keys WHERE enabled=1")){
             try{Tenant t=new Tenant(String.valueOf(row.get("virtual_key")),String.valueOf(row.get("team")),((Number)row.get("monthly_budget_usd")).doubleValue(),((Number)row.get("requests_per_minute")).intValue(),((Number)row.get("tokens_per_minute")).intValue(),Arrays.asList(json.readValue(String.valueOf(row.get("model_allowlist")),String[].class)),((Number)row.get("cache_enabled")).intValue()!=0,((Number)row.get("similarity_threshold")).doubleValue(),String.valueOf(row.get("routing_profile")));tenants.put(t.key,t);}catch(Exception ex){throw new IOException("Unable to load a persisted virtual key",ex);}
         }
@@ -226,8 +237,14 @@ public class PrismService {
     public void admit(Tenant t,String model) {
         validateModel(model);
         if(!t.allowlist.contains(model)) throw new GatewayException(403,"model_not_allowed","Model is not allowed for this key");
-        Double spent=db.queryForObject("SELECT COALESCE((SELECT cost_usd FROM usage_monthly WHERE virtual_key=? AND month=?),0)",Double.class,t.key,YearMonth.now(ZoneOffset.UTC).toString());
-        if(spent>=t.budget) throw new GatewayException(429,"budget_exceeded",String.format(Locale.US,"Monthly budget of $%.5f exhausted for this key",t.budget));
+        String month=YearMonth.now(ZoneOffset.UTC).toString();
+        Double spent=db.queryForObject("SELECT COALESCE((SELECT cost_usd FROM usage_monthly WHERE virtual_key=? AND month=?),0)",Double.class,t.key,month);
+        double accounted=(spent==null?0d:spent);
+        if(zeroCostRequestQuotaUsd>0){
+            Long requests=db.queryForObject("SELECT COALESCE((SELECT requests FROM usage_monthly WHERE virtual_key=? AND month=?),0)",Long.class,t.key,month);
+            accounted+=(requests==null?0L:requests)*zeroCostRequestQuotaUsd;
+        }
+        if(accounted>=t.budget) throw new GatewayException(429,"budget_exceeded",String.format(Locale.US,"Monthly budget of $%.5f exhausted for this key",t.budget));
         Long tokenCap=tenantLongOption(t.key,"token_cap");
         if(tokenCap!=null){Long used=db.queryForObject("SELECT COALESCE((SELECT prompt_tokens+completion_tokens FROM usage_monthly WHERE virtual_key=? AND month=?),0)",Long.class,t.key,YearMonth.now(ZoneOffset.UTC).toString());if(used>=tokenCap)throw new GatewayException(402,"budget_exceeded","Monthly token limit reached for this key");}
         // Both windows are claimed atomically in the shared database so two
@@ -407,8 +424,11 @@ public class PrismService {
     }
     private Provider providerFor(String model) {
         String providerName=routeProviders.get(model);
-        if(providerName==null) providerName=model.contains("-")?model.substring(0,model.indexOf('-')):model;
-        return providers.get(providerName);
+        if(providerName==null){
+            ProviderAdapter adapter=adapters.adapterForRoute(model);
+            providerName=adapter!=null?adapter.id():(model.contains("-")?model.substring(0,model.indexOf('-')):model);
+        }
+        return providerName==null?null:providers.get(providerName);
     }
     private String[] healthOrderedChain(String[] configured){String[] healthy=providerHealth.preferHealthy(configured,model->{Provider p=providerFor(model);return p==null?null:p.name;});if("least_latency".equalsIgnoreCase(routingStrategy))return providerHealth.preferLowestLatency(healthy,model->{Provider p=providerFor(model);return p==null?null:p.name;},false);if("weighted".equalsIgnoreCase(routingStrategy))return providerHealth.preferLowestLatency(healthy,model->{Provider p=providerFor(model);return p==null?null:p.name;},true);return healthy;}
     private String healthRouteReason(String[] configured,String[] ordered,String reason){if(configured.length==0||ordered.length==0||configured[0].equals(ordered[0]))return reason;Provider skipped=providerFor(configured[0]),selected=providerFor(ordered[0]);String detail=skipped!=null&&providerHealth.isDegraded(skipped.name)?"provider health: skipped degraded "+skipped.name:"routing strategy "+routingStrategy+" preferred "+(selected==null?ordered[0]:selected.name)+" over "+(skipped==null?configured[0]:skipped.name);return reason==null?detail:reason+"; "+detail;}
@@ -612,10 +632,19 @@ public class PrismService {
         } else { configured=chain(target,tenant);reason=profileReason(tenant,reason); }
         String[] models=healthOrderedChain(configured);reason=healthRouteReason(configured,models,reason);
         if(!hideModelDetails&&tenant.cacheEnabled&&!Boolean.FALSE.equals(body.get("cache"))&&!asksModelIdentity(prompt)){Result hit=findCache(tenant,requested,prompt);if(hit!=null){String cachedModel=String.valueOf(hit.payload.getOrDefault("model",hit.model));return new StreamSession(null,hit.payload,tenant,requested,prompt,cachedModel,hit.model,"cache",false,reason,task,0,id,started,hideModelDetails,lastUser);}}
+        // One aggregate budget is shared by every provider/attempt. A failed
+        // attempt cannot start the byte or time clock over again.
+        long streamDeadline=System.currentTimeMillis()+streamMaxReadMs;
+        long remainingBytes=streamBufferBytes;
+        int totalAttempts=0;
+        int attemptBudget=Math.max(1,maxAttempts)*Math.max(1,models.length);
         int retries=0;
         for(String model:models){
             Provider provider=providerFor(model);if(provider==null)continue;String upstreamModel=upstreamModels.getOrDefault(model,model);Map<String,Object> outbound=upstreamBody(body);outbound.put("model",upstreamModel);outbound.put("stream",true);if(hideModelDetails)addPrivacyContext(outbound);else addIdentityContext(outbound,prompt,new ModelFacts(requested,model,upstreamModel,provider.name,target,task,configured));prepareRequest(provider,outbound,true);
             for(int attempt=0;attempt<maxAttempts;attempt++){
+                if(totalAttempts>=attemptBudget||System.currentTimeMillis()>=streamDeadline
+                        ||(streamBufferBytes>0&&remainingBytes<=0))break;
+                totalAttempts++;
                 long callStarted=System.nanoTime();
                 try{
                     HttpRequest request=upstreamRequest(provider,outbound);
@@ -626,8 +655,9 @@ public class PrismService {
                             // Nothing is written to the client until the whole upstream
                             // stream is validated. A disconnect or a truncated stream can
                             // therefore be retried or failed over without corrupting SSE.
-                            BufferedUpstream buffered=bufferStream(upstream);
+                            BufferedUpstream buffered=bufferStream(upstream,remainingBytes,streamDeadline);
                             if(buffered!=null){
+                                if(streamBufferBytes>0)remainingBytes-=buffered.bytes().length;
                                 recordHealth(provider,model,true,callLatency);
                                 return new StreamSession(new ByteArrayInputStream(buffered.bytes()),null,tenant,requested,prompt,upstreamModel,model,provider.name+"/"+upstreamModel,!model.equals(configured[0]),reason,task,retries,id,started,hideModelDetails,lastUser);
                             }
@@ -657,14 +687,13 @@ public class PrismService {
      * cases no bytes have been committed to the client yet, so the caller can
      * safely retry or fail over to the next provider.
      */
-    private BufferedUpstream bufferStream(InputStream input) throws IOException {
+    private BufferedUpstream bufferStream(InputStream input,long byteBudget,long deadline) throws IOException {
         ByteArrayOutputStream buffer=new ByteArrayOutputStream();
         byte[] chunk=new byte[8192];
-        long deadline=System.currentTimeMillis()+streamMaxReadMs;
         int read;
         while((read=input.read(chunk))!=-1){
             if(System.currentTimeMillis()>deadline)throw new IOException("stream read timed out");
-            if(streamBufferBytes>0&&buffer.size()+read>streamBufferBytes)throw new IOException("stream exceeded buffer cap");
+            if(byteBudget>0&&buffer.size()+read>byteBudget)throw new IOException("stream exceeded buffer cap");
             buffer.write(chunk,0,read);
         }
         byte[] bytes=buffer.toByteArray();

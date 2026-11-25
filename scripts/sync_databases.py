@@ -105,6 +105,11 @@ def postgres_options() -> dict[str, object]:
         "password": env("DATABASE_PASSWORD") or unquote((query.get("password") or [None])[0] or parsed.password or ""),
         "sslmode": (query.get("sslmode") or ["require"])[0],
         "connect_timeout": 20,
+        # Serverless PostgreSQL gateways such as Nile do not support the
+        # extended-protocol prepared statements psycopg enables by default.
+        # Disabling them keeps bulk upserts portable across both standard
+        # PostgreSQL and managed serverless endpoints.
+        "prepare_threshold": None,
     }
 
 
@@ -247,6 +252,9 @@ def upsert_postgres(conn, table: Table, rows: list[dict], target_columns: list[s
     sql = f"INSERT INTO {quote(table.name)}({names}) VALUES({binds}) ON CONFLICT({conflict}) DO UPDATE SET {updates}"
     changed = 0
     with conn.cursor() as cur:
+        # Keep one statement per round trip: some serverless PostgreSQL
+        # gateways reject psycopg's pipelined executemany mode. Prepared
+        # statements are disabled in postgres_options() for the same reason.
         for row in rows:
             if all(row.get(column) is None for column in columns):
                 continue
@@ -297,8 +305,8 @@ def check(postgres, sqlite: sqlite3.Connection) -> int:
         if missing_remote_cols:
             print(f"    missing in postgres: {', '.join(missing_remote_cols)}")
         if missing_local and not table.environment_local:
-            sample = sorted(missing_local)[:3]
-            print(f"    missing locally (first 3): {sample}")
+            # Keys may be virtual keys or identity values; report the count only.
+            print(f"    missing locally: {len(missing_local)} row(s)")
     print()
     if drift:
         print(f"Drift detected in {drift} table(s).")

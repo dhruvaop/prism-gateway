@@ -17,6 +17,10 @@ public interface BillingOperations {
     /** Verifies the cryptographic payment signature and activates the subscription. */
     Map<String, Object> verifyPayment(long userId, Map<String, Object> body);
 
-    /** Processes server-to-server webhook notifications with idempotency and signature validation. */
-    void handleWebhook(String rawBody, String signature, String eventId);
+    /**
+     * Processes server-to-server webhook notifications with idempotency and
+     * signature validation. The idempotency key is derived from the signed body,
+     * never from an unauthenticated request header.
+     */
+    void handleWebhook(String rawBody, String signature);
 }

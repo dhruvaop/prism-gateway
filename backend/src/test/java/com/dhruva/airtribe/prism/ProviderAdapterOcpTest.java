@@ -70,4 +70,29 @@ class ProviderAdapterOcpTest {
         assertEquals("custom/custom-special", registeredRoutes.get("custom-fast"));
         assertEquals("custom/custom-special", registeredRoutes.get("custom-smart"));
     }
+
+    @Test void hyphenatedAdapterIdsResolveFromRouteNames() {
+        ProviderAdapter custom = new OpenAiCompatibleAdapter() {
+            @Override public String id() { return "custom-labs"; }
+            @Override public String label() { return "Custom Labs"; }
+            @Override public int order() { return 4; }
+            @Override public boolean enabled() { return true; }
+            @Override public String apiKey() { return "not-a-real-key"; }
+            @Override public String baseUrl() { return "http://custom.example/v1"; }
+            @Override public String model() { return "custom-special"; }
+            @Override public boolean preferAsPrimary() { return true; }
+        };
+        ProviderAdapterRegistry registry = new ProviderAdapterRegistry(java.util.List.of(custom, new MockAdapter()));
+        assertSame(custom, registry.adapterForRoute("custom-labs-fast"));
+        assertSame(custom, registry.adapterForRoute("custom-labs-research"));
+    }
+
+    @Test void unknownProviderFallbackIsDisabledAndDoesNotOwnRoutes() {
+        ProviderAdapterRegistry registry = new ProviderAdapterRegistry(java.util.List.of(new MockAdapter()));
+        ProviderAdapter fallback = registry.adapterFor("never-configured");
+        assertEquals("openai-compatible", fallback.id());
+        assertFalse(fallback.enabled());
+        assertEquals("", fallback.baseUrl());
+        assertNull(registry.adapterForRoute("never-configured-fast"));
+    }
 }
