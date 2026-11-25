@@ -6,7 +6,14 @@ FROM maven:3.9.9-eclipse-temurin-17 AS build
 WORKDIR /workspace
 COPY backend/pom.xml ./
 COPY backend/src ./src
-RUN mvn -q -DskipTests package
+# Maven Central occasionally answers 429 during shared-builder builds. Retry a
+# few times before failing so a transient mirror throttle does not abort a deploy.
+RUN for attempt in 1 2 3 4; do \
+      mvn -q -DskipTests package && break; \
+      echo "Maven build attempt $attempt failed; retrying in 15s"; \
+      sleep 15; \
+    done; \
+    test -f /workspace/target/prism-gateway-1.0.0.jar
 
 FROM eclipse-temurin:17-jre
 WORKDIR /app
